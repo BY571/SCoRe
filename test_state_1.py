@@ -16,7 +16,7 @@ give your final answer, write it in the form 'Final Answer: The final answer is 
 """
 
 # Hyperparameters
-MODEL_NAME = "gpt2"
+MODEL_NAME = "deepseek-ai/deepseek-coder-1.3b-instruct" # "gpt2"
 DATASET_NAME = "lighteval/MATH"
 BATCH_SIZE = 2
 LEARNING_RATE = 5e-5
