@@ -1,0 +1,7 @@
+torch
+transformers
+datasets
+accelerate
+scikit-learn
+sentence-transformers
+nltk
