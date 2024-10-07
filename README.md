@@ -27,3 +27,25 @@ Install the required packages using the `requirements.txt` file:
 ```
 pip install -r requirements.txt
 ```
+
+
+
+
+## TODO:
+
+- Test with bigger model (1B deep seek)
+- Still nan?
+
+- clean up code
+- make env setup?
+- combine stage 1-2 
+
+- what does this mean
+```
+In some of our experiments, we also choose to
+amplify the coverage of states used for on-policy RL by incorporating first-attempt solutions obtained
+by repeatedly sampling the base model as offline prompts in RL. We find that incorporating this data,
+especially in Stage II – where the first-turn policy may have drifted further from that of the base model –
+can have substantial benefits especially when attempting to learn from limited data.```
+
+-> Adding preprompts to second stage input from repeated sampled first attempts of the base model!
