@@ -32,7 +32,7 @@ pip install -r requirements.txt
 # Multi-GPU-Training
 
 ```bash
-   export CUDA_VISIBLE_DEVICES=0,1  # Use GPUs 0 and 1
+   export CUDA_VISIBLE_DEVICES=0,1,2  # Use GPUs 0 and 1
    torchrun --nproc_per_node=2 your_training_script.py
 ```
 
