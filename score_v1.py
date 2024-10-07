@@ -434,10 +434,10 @@ def evaluate_model(model, tokenizer, dataloader, device="cpu"):
                 total_reward += torch.sum(reward).item()
                 total_samples += len(solutions)
 
-    correct_answers = torch.stack(correct_answers, dtype=torch.float)
+    correct_answers = torch.stack(correct_answers).float()
     accuracy = torch.mean(correct_answers)
 
-    return total_reward.item(), accuracy.item()
+    return total_reward, accuracy.item()
 
 
 def main():
@@ -455,28 +455,28 @@ def main():
     ).to(device)
 
     for i in range(score_iterations):
-        # model, stage_1_loss = train_stage_1(
-        #     model,
-        #     base_model,
-        #     tokenizer,
-        #     dataloader,
-        #     1,
-        #     LEARNING_RATE,
-        #     BETA2,
-        #     device=device,
-        # )
+        model, stage_1_loss = train_stage_1(
+            model,
+            base_model,
+            tokenizer,
+            dataloader,
+            1,
+            LEARNING_RATE,
+            BETA2,
+            device=device,
+        )
 
-        # model, stage_2_loss = train_stage_2(
-        #     model,
-        #     base_model,
-        #     tokenizer,
-        #     dataloader,
-        #     1,
-        #     LEARNING_RATE,
-        #     BETA1,
-        #     ALPHA,
-        #     device=device,
-        # )
+        model, stage_2_loss = train_stage_2(
+            model,
+            base_model,
+            tokenizer,
+            dataloader,
+            1,
+            LEARNING_RATE,
+            BETA1,
+            ALPHA,
+            device=device,
+        )
 
         total_reward, accuracy = evaluate_model(model, tokenizer, test_dataloader, device=device)
         # Combine all metrics into a single log
