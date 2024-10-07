@@ -18,7 +18,7 @@ give your final answer, write it in the form 'Final Answer: The final answer is 
 """
 
 # Hyperparameters
-MODEL_NAME = "deepseek-ai/deepseek-coder-1.3b-instruct"  # "deepseek-ai/deepseek-coder-1.3b-instruct"
+MODEL_NAME = "microsoft/Phi-3.5-mini-instruct"  # "deepseek-ai/deepseek-coder-1.3b-instruct"
 DATASET_NAME = "lighteval/MATH"
 BATCH_SIZE = 2
 LEARNING_RATE = 5e-5
@@ -62,7 +62,7 @@ def load_model_and_tokenizer(model_name, return_tokenizer=True, quantize=True):
 
 def load_and_prepare_data(dataset_name, tokenizer):
     dataset = load_dataset(dataset_name, split="train[:5%]")
-    test_dataset = load_dataset(dataset_name, split="test[:20%]")
+    test_dataset = load_dataset(dataset_name, split="test[:10%]")
     test_size = 200
     
     # update sizes
@@ -455,6 +455,8 @@ def main():
     ).to(device)
 
     for i in range(score_iterations):
+        total_reward, accuracy = evaluate_model(model, tokenizer, test_dataloader, device=device)
+
         model, stage_1_loss = train_stage_1(
             model,
             base_model,
@@ -478,7 +480,6 @@ def main():
             device=device,
         )
 
-        total_reward, accuracy = evaluate_model(model, tokenizer, test_dataloader, device=device)
         # Combine all metrics into a single log
         wandb.log({
             "stage_1_loss": stage_1_loss / len(dataloader),
@@ -486,7 +487,11 @@ def main():
             "total_reward": total_reward,
             "accuracy": accuracy 
         }, i)
-
+    total_reward, accuracy = evaluate_model(model, tokenizer, test_dataloader, device=device)
+    wandb.log({
+        "total_reward": total_reward,
+        "accuracy": accuracy
+    })
     # Save the trained model
     # trained_model.save_pretrained("score_stage_i_model")
     # tokenizer.save_pretrained("score_stage_i_model")
