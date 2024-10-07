@@ -7,3 +7,4 @@ sentence-transformers
 nltk
 peft
 bitsandbytes
+wandb
