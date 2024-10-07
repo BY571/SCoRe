@@ -72,7 +72,7 @@ def train_score_stage_i(model, tokenizer, dataloader, num_epochs, learning_rate,
     optimizer = AdamW(model.parameters(), lr=learning_rate)
 
     # Load the base model for comparison
-    base_model = AutoModelForCausalLM.from_pretrained(MODEL_NAME).to(device)
+    base_model = AutoModelForCausalLM.from_pretrained(MODEL_NAME).to("cpu")
 
     for epoch in range(num_epochs):
         model.train()
@@ -88,7 +88,7 @@ def train_score_stage_i(model, tokenizer, dataloader, num_epochs, learning_rate,
 
             # First attempt (base model)
             with torch.no_grad():
-                outputs_base_1 = base_model(input_ids, attention_mask=attention_mask)
+                outputs_base_1 = base_model(input_ids.to("cpu"), attention_mask=attention_mask.to("cpu"))
                 logits_base_1 = outputs_base_1.logits
                 probs_base_1 = torch.softmax(logits_base_1, dim=-1)
 
@@ -130,7 +130,7 @@ def train_score_stage_i(model, tokenizer, dataloader, num_epochs, learning_rate,
             probs_2 = torch.softmax(logits_2, dim=-1)
 
             # Compute KL divergence
-            kl_div = compute_kl_divergence(probs_base_1, probs_1)
+            kl_div = compute_kl_divergence(probs_base_1.to(device), probs_1)
 
             # Generate second attempt responses
             y2 = torch.argmax(probs_2, dim=-1)
