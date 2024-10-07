@@ -1,11 +1,8 @@
 import numpy as np
 import torch
-import torch.distributed as dist
 from datasets import load_dataset
 from string_matcher import LLMAnswerComparator
-from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.utils.data import DataLoader
-from torch.utils.data.distributed import DistributedSampler
+from torch.utils.data import DataLoader, DistributedSampler
 from tqdm import tqdm
 from transformers import AdamW, AutoModelForCausalLM, AutoTokenizer
 
@@ -29,12 +26,9 @@ BETA2 = 1.0
 comparator = LLMAnswerComparator(threshold=0.9)
 
 
-def setup(rank, world_size):
-    dist.init_process_group("nccl", rank=rank, world_size=world_size)
-
-
-def cleanup():
-    dist.destroy_process_group()
+def setup_distributed_training():
+    torch.distributed.init_process_group(backend="nccl")
+    torch.cuda.set_device(torch.distributed.get_rank())
 
 
 def load_model_and_tokenizer(model_name):
@@ -43,7 +37,7 @@ def load_model_and_tokenizer(model_name):
     return model, tokenizer
 
 
-def load_and_prepare_data(dataset_name, tokenizer, rank, world_size):
+def load_and_prepare_data(dataset_name, tokenizer):
     dataset = load_dataset(dataset_name, split="train[:5%]")
 
     def tokenize_function(examples):
@@ -56,9 +50,7 @@ def load_and_prepare_data(dataset_name, tokenizer, rank, world_size):
         )
 
     tokenized_dataset = dataset.map(tokenize_function, batched=True)
-
-    sampler = DistributedSampler(tokenized_dataset, num_replicas=world_size, rank=rank)
-    return DataLoader(tokenized_dataset, batch_size=BATCH_SIZE, sampler=sampler)
+    return tokenized_dataset
 
 
 def compute_kl_divergence(p, q):
@@ -66,40 +58,31 @@ def compute_kl_divergence(p, q):
 
 
 def estimate_reward(y2, y_star):
-
     results = comparator.batch_compare(y2, oracle_responses=y_star, method="bert")
-    # results is a list of tuples (similarity, correct)
     similarities = [result[0] for result in results]
     return torch.tensor(similarities)
 
 
-def train_score_stage_i(
-    rank, world_size, model, tokenizer, dataloader, num_epochs, learning_rate, beta2
-):
-    setup(rank, world_size)
-
-    device = torch.device(f"cuda:{rank}")
-    model = model.to(device)
-    model = DDP(model, device_ids=[rank])
-
+def train_score_stage_i(model, tokenizer, dataloader, num_epochs, learning_rate, beta2):
+    device = torch.device(f"cuda:{torch.distributed.get_rank()}")  # Set device based on rank
+    model.to(device)
+    model = torch.nn.parallel.DistributedDataParallel(
+        model
+    )  # Wrap model for distributed training
     optimizer = AdamW(model.parameters(), lr=learning_rate)
 
+    # Load the base model for comparison
     base_model = AutoModelForCausalLM.from_pretrained(MODEL_NAME).to(device)
 
     for epoch in range(num_epochs):
-        dataloader.sampler.set_epoch(epoch)
         model.train()
         total_loss = 0
 
         for batch in tqdm(dataloader, desc=f"Epoch {epoch + 1}/{num_epochs}"):
             input_ids = batch["input_ids"]
-            input_ids = torch.stack(input_ids)
-            # reshape (max token, batch)-> (batch, max token)
-            input_ids = input_ids.transpose(0, 1).to(device)
+            input_ids = torch.stack(input_ids).transpose(0, 1).to(device)
             attention_mask = batch["attention_mask"]
-            attention_mask = torch.stack(attention_mask)
-            # reshape (max token, batch)-> (batch, max token)
-            attention_mask = attention_mask.transpose(0, 1).to(device)
+            attention_mask = torch.stack(attention_mask).transpose(0, 1).to(device)
 
             solutions = batch["solution"]
 
@@ -114,13 +97,9 @@ def train_score_stage_i(
             logits_1 = outputs_1.logits
             probs_1 = torch.softmax(logits_1, dim=-1)
 
-            # Add check for correctnes (interaction with "the environment")
-            # 1. transform to words
+            # Add check for correctness (interaction with "the environment")
             attempt1_probs = torch.argmax(probs_1, dim=-1)
             attempt1 = tokenizer.batch_decode(attempt1_probs, skip_special_tokens=True)
-
-            # we could additional information which are responses are correct:
-            #  estimate_reward(y2_decoded, solutions)
 
             correction_inputs = [
                 attempt + self_correction_prompt for attempt in attempt1
@@ -131,16 +110,16 @@ def train_score_stage_i(
                 padding="max_length",
                 max_length=MAX_LENGTH,
                 return_tensors="pt",
-            )
-            # we still need the orig input!
+            ).to(
+                device
+            )  # Move to the correct device
 
             # Combine original input_ids with correction_encodings
             combined_input_ids = torch.cat(
-                (input_ids, correction_encodings["input_ids"].to(device)), dim=1
+                (input_ids, correction_encodings["input_ids"]), dim=1
             )
             combined_attention_mask = torch.cat(
-                (attention_mask, correction_encodings["attention_mask"].to(device)),
-                dim=1,
+                (attention_mask, correction_encodings["attention_mask"]), dim=1
             )
 
             # Second attempt (trained model)
@@ -150,45 +129,54 @@ def train_score_stage_i(
             logits_2 = outputs_2.logits
             probs_2 = torch.softmax(logits_2, dim=-1)
 
-            # Compute KL divergence between the first attempt of the base model and the trained model
+            # Compute KL divergence
             kl_div = compute_kl_divergence(probs_base_1, probs_1)
 
             # Generate second attempt responses
             y2 = torch.argmax(probs_2, dim=-1)
-
-            # Decode y2 answers
             y2_decoded = tokenizer.batch_decode(y2, skip_special_tokens=True)
 
             # Estimate reward
             reward = estimate_reward(y2_decoded, solutions)
 
-            loss = -torch.mean(reward) + beta2 * torch.mean(kl_div)
+            # Compute loss
+            action_log_probs = torch.log(
+                torch.gather(probs_2, -1, y2.unsqueeze(-1))
+            ).to("cpu")
+            loss = -torch.mean(action_log_probs * reward) + beta2 * torch.mean(kl_div)
+
+            print("Loss: ", loss.item())
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
 
             total_loss += loss.item()
 
-        if rank == 0:
-            print(
-                f"Epoch {epoch + 1}/{num_epochs}, Loss: {total_loss / len(dataloader):.4f}"
-            )
+        print(
+            f"Epoch {epoch + 1}/{num_epochs}, Loss: {total_loss / len(dataloader):.4f}"
+        )
 
-    cleanup()
     return model
 
 
 def main():
-    world_size = 2  # Number of GPUs
+    setup_distributed_training()  # Initialize distributed training
     model, tokenizer = load_model_and_tokenizer(MODEL_NAME)
     tokenizer.pad_token = tokenizer.eos_token
+    tokenized_dataset = load_and_prepare_data(DATASET_NAME, tokenizer)
 
-    torch.multiprocessing.spawn(
-        train_score_stage_i,
-        args=(world_size, model, tokenizer, None, NUM_EPOCHS, LEARNING_RATE, BETA2),
-        nprocs=world_size,
-        join=True,
+    # Use DistributedSampler for the DataLoader
+    sampler = DistributedSampler(tokenized_dataset)
+    dataloader = DataLoader(tokenized_dataset, batch_size=BATCH_SIZE, sampler=sampler)
+
+    trained_model = train_score_stage_i(
+        model, tokenizer, dataloader, NUM_EPOCHS, LEARNING_RATE, BETA2
     )
+
+    # Save the trained model
+    # trained_model.save_pretrained("score_stage_i_model")
+    # tokenizer.save_pretrained("score_stage_i_model")
+    # print("Training completed. Model saved as 'score_stage_i_model'.")
 
 
 if __name__ == "__main__":

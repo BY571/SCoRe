@@ -16,7 +16,7 @@ give your final answer, write it in the form 'Final Answer: The final answer is 
 """
 
 # Hyperparameters
-MODEL_NAME = "deepseek-ai/deepseek-coder-1.3b-instruct"  # "gpt2"
+MODEL_NAME = "gpt2"  # "deepseek-ai/deepseek-coder-1.3b-instruct"
 DATASET_NAME = "lighteval/MATH"
 BATCH_SIZE = 2
 LEARNING_RATE = 5e-5
@@ -146,7 +146,10 @@ def train_score_stage_i(model, tokenizer, dataloader, num_epochs, learning_rate,
             reward = estimate_reward(y2_decoded, solutions)
 
             # Compute loss
-            loss = -torch.mean(reward) + beta2 * torch.mean(kl_div)
+            #entropy = -torch.sum(probs_2 * torch.log(probs_2 + 1e-12), dim=-1).mean()
+            action_log_probs = torch.log(torch.gather(probs_2, -1, y2.unsqueeze(-1))).to("cpu")
+            loss = -torch.mean(action_log_probs * reward) + beta2 * torch.mean(kl_div) #- entropy_coeff * entropy
+
             print("Loss: ", loss)
             optimizer.zero_grad()
             loss.backward()
