@@ -62,21 +62,19 @@ def update_dataset_split(dataset_split):
     return dataset_split.from_list(updated_data)
 
 def update_dataset():
-    # Load both train and test splits of the dataset
-    dataset = load_dataset("lighteval/MATH")
     
     # Update each split
-    updated_train = update_dataset_split(dataset['train'])
-    updated_test = update_dataset_split(dataset['test'])
+    updated_train = update_dataset_split(load_dataset("lighteval/MATH", split="train[95%:]"))
+    updated_test = update_dataset_split(load_dataset("lighteval/MATH", split="test[95%:]"))
     
     # Combine updated splits into a new dataset
-    updated_dataset = DatasetDict({
+    dataset = DatasetDict({
         'train': updated_train,
         'test': updated_test
     })
     
     # Save the updated dataset
-    updated_dataset.save_to_disk("updated_math_dataset")
+    dataset.save_to_disk("updated_math_dataset")
     
     print("Dataset updated and saved to 'updated_math_dataset' directory")
 
