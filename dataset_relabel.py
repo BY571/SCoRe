@@ -3,8 +3,13 @@ import openai
 from datasets import load_dataset, DatasetDict
 from tqdm import tqdm
 
+# Load the API key from api.txt
+def load_api_key():
+    with open('api.txt', 'r') as file:
+        return file.read().strip()
+
 # Set your OpenAI API key
-openai.api_key = "sk-QEvs87MTsegPblI1NHQmNoax7xv4TzcuZqt_z35ZTjT3BlbkFJ8CR7PhsLd-ymI2Kj16ECv4WOQq7Ow4p2tdzMPBC60A"
+openai.api_key = load_api_key()
 
 def extract_final_answer(solution):
     prompt = f"""
