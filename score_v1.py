@@ -7,6 +7,11 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 import wandb
+import os
+import re
+
+# Set CUDA device to the first GPU
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 math_prompt = """You are a math expert. When you respond, respond only with the Solution of the final Problem, thinking step by
 step. At the end of the Solution, when you give your final answer, write it in the form 'Final Answer: The final
@@ -18,7 +23,7 @@ give your final answer, write it in the form 'Final Answer: The final answer is 
 """
 
 # Hyperparameters
-MODEL_NAME = "microsoft/Phi-3.5-mini-instruct"  # "deepseek-ai/deepseek-coder-1.3b-instruct"
+MODEL_NAME = "Qwen/Qwen2.5-3B-Instruct"  # "deepseek-ai/deepseek-coder-1.3b-instruct"
 DATASET_NAME = "lighteval/MATH"
 BATCH_SIZE = 2
 LEARNING_RATE = 5e-5
@@ -27,8 +32,16 @@ MAX_LENGTH = 256
 BETA1 = 0.1
 BETA2 = 1.0
 ALPHA = 2.0  # 𝛼 is a positive constant multiplier, ideally larger than 1.0
-comparator = LLMAnswerComparator(threshold=0.95)
+comparator = LLMAnswerComparator(threshold=0.9)
 
+
+def extract_final_answer(solution):
+    pattern = r"Final Answer: The final answer is \$(.*?)\$\. I hope it is correct\."
+    match = re.search(pattern, solution)
+    if match:
+        return match.group(1)
+    else:
+        return None
 
 def load_model_and_tokenizer(model_name, return_tokenizer=True, quantize=True):
     bnb_config = BitsAndBytesConfig(
@@ -42,18 +55,18 @@ def load_model_and_tokenizer(model_name, return_tokenizer=True, quantize=True):
     model = AutoModelForCausalLM.from_pretrained(
         model_name, quantization_config=bnb_config, device_map="auto"
     )
-
-    model = prepare_model_for_kbit_training(model)
-
-    config = LoraConfig(
-        r=8,
-        lora_alpha=32,
-        target_modules=["q_proj", "v_proj"],
-        lora_dropout=0.05,
-        bias="none",
-        task_type="CAUSAL_LM",
-    )
     if quantize:
+        model = prepare_model_for_kbit_training(model)
+
+        config = LoraConfig(
+            r=8,
+            lora_alpha=32,
+            target_modules=["q_proj", "v_proj"],
+            lora_dropout=0.05,
+            bias="none",
+            task_type="CAUSAL_LM",
+        )
+
         model = get_peft_model(model, config)
     if return_tokenizer:
         return model, tokenizer
@@ -455,7 +468,7 @@ def main():
     ).to(device)
 
     for i in range(score_iterations):
-        total_reward, accuracy = evaluate_model(model, tokenizer, test_dataloader, device=device)
+        # total_reward, accuracy = evaluate_model(model, tokenizer, test_dataloader, device=device)
 
         model, stage_1_loss = train_stage_1(
             model,
