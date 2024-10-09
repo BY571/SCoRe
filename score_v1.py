@@ -23,8 +23,8 @@ give your final answer, write it in the form 'Final Answer: The final answer is 
 """
 
 # Hyperparameters
-MODEL_NAME = "Qwen/Qwen2.5-3B-Instruct"  # "deepseek-ai/deepseek-coder-1.3b-instruct"
-DATASET_NAME = "lighteval/MATH"
+MODEL_NAME = "microsoft/Phi-3-mini-128k-instruct"  # "deepseek-ai/deepseek-coder-1.3b-instruct"
+DATASET_NAME = "Sebasdi/math_final_answer"
 BATCH_SIZE = 2
 LEARNING_RATE = 5e-5
 NUM_EPOCHS = 3
@@ -41,7 +41,7 @@ def extract_final_answer(solution):
     if match:
         return match.group(1)
     else:
-        return None
+        return ""
 
 def load_model_and_tokenizer(model_name, return_tokenizer=True, quantize=True):
     bnb_config = BitsAndBytesConfig(
@@ -53,7 +53,7 @@ def load_model_and_tokenizer(model_name, return_tokenizer=True, quantize=True):
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     model = AutoModelForCausalLM.from_pretrained(
-        model_name, quantization_config=bnb_config, device_map="auto"
+        model_name, quantization_config=bnb_config if quantize else None, device_map="auto", torch_dtype=torch.bfloat16,
     )
     if quantize:
         model = prepare_model_for_kbit_training(model)
@@ -74,8 +74,8 @@ def load_model_and_tokenizer(model_name, return_tokenizer=True, quantize=True):
 
 
 def load_and_prepare_data(dataset_name, tokenizer):
-    dataset = load_dataset(dataset_name, split="train[:5%]")
-    test_dataset = load_dataset(dataset_name, split="test[:10%]")
+    dataset = load_dataset(dataset_name, split="train")
+    test_dataset = load_dataset(dataset_name, split="test")
     test_size = 200
     
     # update sizes
@@ -228,7 +228,7 @@ def train_stage_1(
             y2_decoded = tokenizer.batch_decode(y2, skip_special_tokens=True)
 
             # Estimate reward
-            reward = estimate_reward(y2_decoded, solutions)
+            reward = estimate_reward(extract_final_answer(y2_decoded), extract_final_answer(solutions))
 
             # Compute loss
             # entropy = -torch.sum(probs_2 * torch.log(probs_2 + 1e-12), dim=-1).mean()
@@ -464,8 +464,8 @@ def main():
     model.to(device)
     # Load the base model for comparison
     base_model = load_model_and_tokenizer(
-        MODEL_NAME, return_tokenizer=False, quantize=True
-    ).to(device)
+        MODEL_NAME, return_tokenizer=False, quantize=False
+    ).to(device).eval()
 
     for i in range(score_iterations):
         # total_reward, accuracy = evaluate_model(model, tokenizer, test_dataloader, device=device)
