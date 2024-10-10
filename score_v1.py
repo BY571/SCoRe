@@ -22,7 +22,7 @@ the error, if any, and rewrite the solution. Only output the final solution! At 
 give your final answer, write it in the form 'Final Answer: The final answer is $answer$. I hope it is correct.' """
 
 # Hyperparameters
-MODEL_NAME = "microsoft/Phi-3-mini-128k-instruct"
+MODEL_NAME = "microsoft/Phi-3-mini-4k-instruct"
 DATASET_NAME = "Sebasdi/math_final_answer"
 BATCH_SIZE = 2
 LEARNING_RATE = 5e-5
@@ -46,7 +46,7 @@ def extract_final_answer(solution):
     return out
 
 
-def load_model_and_tokenizer(model_name, return_tokenizer=True, quantize=True):
+def load_model_and_tokenizer(model_name, return_tokenizer=True, quantize=True, lora=True):
     if "Phi" not in model_name:
         print(
             "Warning: 'Phi' not found in model_name! This code is optimized for the Phi models!"
@@ -59,7 +59,7 @@ def load_model_and_tokenizer(model_name, return_tokenizer=True, quantize=True):
     )
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
-    tokenizer.model_max_length = 2048
+    tokenizer.model_max_length = 1024
     tokenizer.pad_token = (
         tokenizer.unk_token
     )  # use unk rather than eos token to prevent endless generation
@@ -74,7 +74,7 @@ def load_model_and_tokenizer(model_name, return_tokenizer=True, quantize=True):
         use_cache=False,
         # attn_implementation="flash_attention_2",  # loading the model with flash-attenstion support
     )
-    if quantize:
+    if lora:
         model = prepare_model_for_kbit_training(model)
 
         config = LoraConfig(
@@ -192,13 +192,13 @@ def train_stage_1(
             solutions = batch["solution"]
 
             # First attempt (trained model) get on-policy action of the train model
-            action1_token = model.generate(input_ids, max_new_tokens=256)
+            action1_token = model.generate(input_ids, max_new_tokens=256, use_cache=False)
             # <- our final action (includes the prompt!)
             action1 = tokenizer.batch_decode(action1_token, skip_special_tokens=True)
 
             input_ids_2 = [a1 + self_correction_prompt for a1 in action1]
             input_ids_2 = tokenizer(input_ids_2, padding="max_length", truncation=True, max_length=MAX_LENGTH, return_tensors="pt",).input_ids
-            action2_token = model.generate(input_ids_2, max_new_tokens=256)
+            action2_token = model.generate(input_ids_2.to(device), max_new_tokens=256, use_cache=False)
             action2 = tokenizer.batch_decode(action2_token, skip_special_tokens=True)
 
             # Now we have the trajectory a1, a2 and we need to calculate the Reward and Loss
@@ -217,6 +217,7 @@ def train_stage_1(
                     max_new_tokens=256,
                     output_logits=True,
                     return_dict_in_generate=True,
+                    use_cache=False,
                 )
                 logits_base_1 = torch.stack(out_dict_base.logits).transpose(0, 1)
                 probs_base_1 = torch.softmax(logits_base_1, dim=-1)
@@ -252,6 +253,7 @@ def train_stage_1(
             total_loss += loss.item()
 
             epoch_loss += loss.item()
+            print("Loss: ", loss.item())
 
         print(
             f"Epoch {epoch + 1}/{num_epochs}, Loss: {epoch_loss / len(dataloader):.4f}"
@@ -476,14 +478,15 @@ def main():
     model, tokenizer = load_model_and_tokenizer(MODEL_NAME)
     dataloader, test_dataloader = load_and_prepare_data(DATASET_NAME, tokenizer)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
     model.to(device)
+    model = torch.compile(model)
     # Load the base model for comparison
     base_model = (
-        load_model_and_tokenizer(MODEL_NAME, return_tokenizer=False, quantize=True)
+        load_model_and_tokenizer(MODEL_NAME, return_tokenizer=False, quantize=True, lora=False)
         .to(device)
         .eval()
     )
+    base_model = torch.compile(base_model)
     optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE)
     # TODO add scheduler with warmup steps
 
