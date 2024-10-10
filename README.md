@@ -55,3 +55,7 @@ especially in Stage II – where the first-turn policy may have drifted further 
 can have substantial benefits especially when attempting to learn from limited data.```
 
 -> Adding preprompts to second stage input from repeated sampled first attempts of the base model!
+```
+
+# Additional Info:
+Fine tune Phis: [hugging face](https://huggingface.co/microsoft/Phi-3-mini-128k-instruct/blob/main/sample_finetune.py)

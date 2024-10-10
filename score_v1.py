@@ -1,34 +1,33 @@
+import os
+import re
+
 import numpy as np
 import torch
-from datasets import load_dataset, concatenate_datasets
+import wandb
+from datasets import concatenate_datasets, load_dataset
 from peft import get_peft_model, LoraConfig, prepare_model_for_kbit_training
 from string_matcher import LLMAnswerComparator
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
-import wandb
-import os
-import re
 
 # Set CUDA device to the first GPU
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
 math_prompt = """You are a math expert. When you respond, respond only with the Solution of the final Problem, thinking step by
 step. At the end of the Solution, when you give your final answer, write it in the form 'Final Answer: The final
 answer is $answer$. I hope it is correct.'"""
-
 self_correction_prompt = """There might be an error in the solution above because of lack of understanding of the question. Please correct
 the error, if any, and rewrite the solution. Only output the final solution! At the end of the Solution, when you
-give your final answer, write it in the form 'Final Answer: The final answer is $answer$. I hope it is correct.'
-"""
+give your final answer, write it in the form 'Final Answer: The final answer is $answer$. I hope it is correct.' """
 
 # Hyperparameters
-MODEL_NAME = "microsoft/Phi-3-mini-128k-instruct"  # "deepseek-ai/deepseek-coder-1.3b-instruct"
+MODEL_NAME = "microsoft/Phi-3-mini-128k-instruct"
 DATASET_NAME = "Sebasdi/math_final_answer"
 BATCH_SIZE = 2
 LEARNING_RATE = 5e-5
 NUM_EPOCHS = 3
-MAX_LENGTH = 256
+MAX_LENGTH = 512
 BETA1 = 0.1
 BETA2 = 1.0
 ALPHA = 2.0  # 𝛼 is a positive constant multiplier, ideally larger than 1.0
@@ -36,14 +35,22 @@ comparator = LLMAnswerComparator(threshold=0.9)
 
 
 def extract_final_answer(solution):
-    pattern = r"Final Answer: The final answer is \$(.*?)\$\. I hope it is correct\."
-    match = re.search(pattern, solution)
-    if match:
-        return match.group(1)
-    else:
-        return ""
+    pattern = r"Final Answer: The final answer is \$(.*?)\$\ ."  # I hope it is correct\
+    out = []
+    for sol in solution:
+        match = re.search(pattern, sol)
+        if match:
+            out.append(match.group(1))
+        else:
+            out.append(sol)
+    return out
+
 
 def load_model_and_tokenizer(model_name, return_tokenizer=True, quantize=True):
+    if "Phi" not in model_name:
+        print(
+            "Warning: 'Phi' not found in model_name! This code is optimized for the Phi models!"
+        )
     bnb_config = BitsAndBytesConfig(
         load_in_4bit=True,
         bnb_4bit_use_double_quant=True,
@@ -52,16 +59,30 @@ def load_model_and_tokenizer(model_name, return_tokenizer=True, quantize=True):
     )
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
+    tokenizer.model_max_length = 2048
+    tokenizer.pad_token = (
+        tokenizer.unk_token
+    )  # use unk rather than eos token to prevent endless generation
+    tokenizer.pad_token_id = tokenizer.convert_tokens_to_ids(tokenizer.pad_token)
+    tokenizer.padding_side = "right"
     model = AutoModelForCausalLM.from_pretrained(
-        model_name, quantization_config=bnb_config if quantize else None, device_map="auto", torch_dtype=torch.bfloat16,
+        model_name,
+        quantization_config=bnb_config if quantize else None,
+        device_map="auto",
+        torch_dtype=torch.bfloat16,
+        trust_remote_code=True,
+        use_cache=False,
+        # attn_implementation="flash_attention_2",  # loading the model with flash-attenstion support
     )
     if quantize:
         model = prepare_model_for_kbit_training(model)
 
         config = LoraConfig(
-            r=8,
+            r=8,  # 16
             lora_alpha=32,
-            target_modules=["q_proj", "v_proj"],
+            target_modules=(
+                "all-linear" if "Phi" in model_name else ["q_proj", "v_proj"]
+            ),
             lora_dropout=0.05,
             bias="none",
             task_type="CAUSAL_LM",
@@ -77,7 +98,7 @@ def load_and_prepare_data(dataset_name, tokenizer):
     dataset = load_dataset(dataset_name, split="train")
     test_dataset = load_dataset(dataset_name, split="test")
     test_size = 200
-    
+
     # update sizes
     # Take 500 examples from the test set for our new test set
     new_test_dataset = test_dataset.select(range(test_size))
@@ -89,7 +110,6 @@ def load_and_prepare_data(dataset_name, tokenizer):
     dataset = concatenate_datasets([dataset, remaining_test])
     test_dataset = new_test_dataset
 
-
     def tokenize_function(examples):
         # add the math preprompt to all problems
         examples["problem"] = [math_prompt + problem for problem in examples["problem"]]
@@ -98,6 +118,7 @@ def load_and_prepare_data(dataset_name, tokenizer):
             truncation=True,
             padding="max_length",
             max_length=MAX_LENGTH,
+            return_tensors="pt",
         )
 
     tokenized_dataset = dataset.map(tokenize_function, batched=True)
@@ -149,11 +170,10 @@ def train_stage_1(
     tokenizer,
     dataloader,
     num_epochs,
-    learning_rate,
+    optimizer,
     beta2,
     device="cpu",
 ):
-    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
     total_loss = 0  # Initialize total_loss here
     for epoch in range(num_epochs):
         model.train()
@@ -171,73 +191,59 @@ def train_stage_1(
 
             solutions = batch["solution"]
 
-            # First attempt (base model)
+            # First attempt (trained model) get on-policy action of the train model
+            action1_token = model.generate(input_ids, max_new_tokens=256)
+            # <- our final action (includes the prompt!)
+            action1 = tokenizer.batch_decode(action1_token, skip_special_tokens=True)
+
+            input_ids_2 = [a1 + self_correction_prompt for a1 in action1]
+            input_ids_2 = tokenizer(input_ids_2, padding="max_length", truncation=True, max_length=MAX_LENGTH, return_tensors="pt",).input_ids
+            action2_token = model.generate(input_ids_2, max_new_tokens=256)
+            action2 = tokenizer.batch_decode(action2_token, skip_special_tokens=True)
+
+            # Now we have the trajectory a1, a2 and we need to calculate the Reward and Loss
+
+            # Compute reward:
+            reward = estimate_reward(
+                extract_final_answer(action2), extract_final_answer(solutions)
+            )
+
+            # Compute the loss
+            # First attempt (base model) get on-policy action of the base model
             with torch.no_grad():
-                outputs_base_1 = base_model(input_ids, attention_mask=attention_mask)
-                logits_base_1 = outputs_base_1.logits
+                out_dict_base = base_model.generate(
+                    input_ids,
+                    attention_mask=attention_mask,
+                    max_new_tokens=256,
+                    output_logits=True,
+                    return_dict_in_generate=True,
+                )
+                logits_base_1 = torch.stack(out_dict_base.logits).transpose(0, 1)
                 probs_base_1 = torch.softmax(logits_base_1, dim=-1)
 
-            # First attempt (trained model)
-            outputs_1 = model(input_ids, attention_mask=attention_mask)
-            logits_1 = outputs_1.logits
+            # Compute logprobs of the first attempt of the trained model
+            logits_1 = model(action1_token).logits
             probs_1 = torch.softmax(logits_1, dim=-1)
 
-            # Add check for correctnes (interaction with "the environment")
-            # 1. transform to words
-            attempt1_probs = torch.argmax(probs_1, dim=-1)
-            attempt1 = tokenizer.batch_decode(attempt1_probs, skip_special_tokens=True)
+            # Compute KL divergence between the first attempt of the base model and the trained model
 
-            # we could additional information which are responses are correct:
-            #  estimate_reward(y2_decoded, solutions)
-
-            correction_inputs = [
-                attempt + self_correction_prompt for attempt in attempt1
-            ]
-            correction_encodings = tokenizer(
-                correction_inputs,
-                truncation=True,
-                padding="max_length",
-                max_length=MAX_LENGTH,
-                return_tensors="pt",
-            )
-            # we still need the orig input!
-
-            # Combine original input_ids with correction_encodings
-            combined_input_ids = torch.cat(
-                (input_ids, correction_encodings["input_ids"].to(device)), dim=1
-            )
-            combined_attention_mask = torch.cat(
-                (attention_mask, correction_encodings["attention_mask"].to(device)),
-                dim=1,
-            )
+            # Get the minimum length
+            min_length = min(probs_base_1.size(1), probs_1.size(1))
+            kl_div = compute_kl_divergence(probs_base_1[:, :min_length, :], probs_1[:, :min_length, :])
 
             # Second attempt (trained model)
-            outputs_2 = model(
-                combined_input_ids, attention_mask=combined_attention_mask
-            )
+            outputs_2 = model(action2_token)
             logits_2 = outputs_2.logits
-            probs_2 = torch.softmax(logits_2, dim=-1)
+            # probs_2 = torch.softmax(logits_2, dim=-1)
 
-            # Compute KL divergence between the first attempt of the base model and the trained model
-            kl_div = compute_kl_divergence(probs_base_1, probs_1)
+            # Compute policy gradient loss using reward for y2_logits
+            log_probs = torch.log_softmax(logits_2, dim=-1)
+            action_log_probs = torch.gather(log_probs, -1, action2_token.unsqueeze(-1))
 
-            # Generate second attempt responses
-            y2 = torch.argmax(probs_2, dim=-1)
+            # TODO: Test do we need action log probs for the first attempt?
 
-            # Decode y2 answers
-            y2_decoded = tokenizer.batch_decode(y2, skip_special_tokens=True)
-
-            # Estimate reward
-            reward = estimate_reward(extract_final_answer(y2_decoded), extract_final_answer(solutions))
-
-            # Compute loss
-            # entropy = -torch.sum(probs_2 * torch.log(probs_2 + 1e-12), dim=-1).mean()
-            action_log_probs = torch.log(
-                torch.gather(probs_2, -1, y2.unsqueeze(-1))
-            ).to("cpu")
-            loss = -torch.mean(action_log_probs * reward) + beta2 * torch.mean(
-                kl_div
-            )  # - entropy_coeff * entropy
+            # Compute the loss
+            loss = -torch.sum(action_log_probs) * reward.mean() + beta2 * torch.mean(kl_div).to("cpu")
 
             optimizer.zero_grad()
             loss.backward()
@@ -260,12 +266,12 @@ def train_stage_2(
     tokenizer,
     dataloader,
     num_epochs,
-    learning_rate,
+    optimizer,
     beta1,
     alpha,
     device="cpu",
 ):
-    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
+
     total_loss = 0  # Initialize total_loss here
     for epoch in range(num_epochs):
         model.train()
@@ -285,8 +291,14 @@ def train_stage_2(
 
             # First attempt (base model)
             with torch.no_grad():
-                outputs_base_1 = base_model(input_ids, attention_mask=attention_mask)
-                logits_base_1 = outputs_base_1.logits
+                out_dict_base = base_model.generate(
+                    input_ids,
+                    attention_mask=attention_mask,
+                    max_new_tokens=MAX_LENGTH,
+                    output_logits=True,
+                    return_dict_in_generate=True,
+                )
+                logits_base_1 = torch.stack(out_dict_base.logits).transpose(0, 1)
                 probs_base_1 = torch.softmax(logits_base_1, dim=-1)
 
             # First attempt (trained model)
@@ -329,10 +341,13 @@ def train_stage_2(
 
             # Second attempt (base model)
             with torch.no_grad():
-                outputs_base_2 = base_model(
-                    combined_input_ids, attention_mask=combined_attention_mask
+                outputs_base_2 = base_model.generate(
+                    combined_input_ids,
+                    max_new_tokens=1000,
+                    output_logits=True,
+                    return_dict_in_generate=True,
                 )
-                logits_base_2 = outputs_base_2.logits
+                logits_base_2 = torch.stack(out_dict_base.logits).transpose(0, 1)
                 probs_base_2 = torch.softmax(logits_base_2, dim=-1)
 
             # Second attempt (trained model)
@@ -402,7 +417,9 @@ def evaluate_model(model, tokenizer, dataloader, device="cpu"):
             y_pred_decoded = tokenizer.batch_decode(y_pred, skip_special_tokens=True)
 
             reward, correct = estimate_reward(
-                y_pred_decoded, solutions, return_correctness=True
+                extract_final_answer(y_pred_decoded),
+                extract_final_answer(solutions),
+                return_correctness=True,
             )
 
             if correct.item() == 1:
@@ -457,15 +474,18 @@ def main():
     wandb.init(project="SCoRe-v1")
     score_iterations = 4
     model, tokenizer = load_model_and_tokenizer(MODEL_NAME)
-    tokenizer.pad_token = tokenizer.eos_token
     dataloader, test_dataloader = load_and_prepare_data(DATASET_NAME, tokenizer)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     model.to(device)
     # Load the base model for comparison
-    base_model = load_model_and_tokenizer(
-        MODEL_NAME, return_tokenizer=False, quantize=False
-    ).to(device).eval()
+    base_model = (
+        load_model_and_tokenizer(MODEL_NAME, return_tokenizer=False, quantize=True)
+        .to(device)
+        .eval()
+    )
+    optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE)
+    # TODO add scheduler with warmup steps
 
     for i in range(score_iterations):
         # total_reward, accuracy = evaluate_model(model, tokenizer, test_dataloader, device=device)
@@ -476,35 +496,37 @@ def main():
             tokenizer,
             dataloader,
             1,
-            LEARNING_RATE,
+            optimizer,
             BETA2,
             device=device,
         )
 
-        model, stage_2_loss = train_stage_2(
-            model,
-            base_model,
-            tokenizer,
-            dataloader,
-            1,
-            LEARNING_RATE,
-            BETA1,
-            ALPHA,
-            device=device,
-        )
+        # model, stage_2_loss = train_stage_2(
+        #     model,
+        #     base_model,
+        #     tokenizer,
+        #     dataloader,
+        #     1,
+        #     optimizer,
+        #     BETA1,
+        #     ALPHA,
+        #     device=device,
+        # )
 
         # Combine all metrics into a single log
-        wandb.log({
-            "stage_1_loss": stage_1_loss / len(dataloader),
-            "stage_2_loss": stage_2_loss / len(dataloader),
-            "total_reward": total_reward,
-            "accuracy": accuracy 
-        }, i)
-    total_reward, accuracy = evaluate_model(model, tokenizer, test_dataloader, device=device)
-    wandb.log({
-        "total_reward": total_reward,
-        "accuracy": accuracy
-    })
+        wandb.log(
+            {
+                "stage_1_loss": stage_1_loss / len(dataloader),
+                # "stage_2_loss": stage_2_loss / len(dataloader),
+                "total_reward": total_reward,
+                "accuracy": accuracy,
+            },
+            i,
+        )
+    total_reward, accuracy = evaluate_model(
+        model, tokenizer, test_dataloader, device=device
+    )
+    wandb.log({"total_reward": total_reward, "accuracy": accuracy})
     # Save the trained model
     # trained_model.save_pretrained("score_stage_i_model")
     # tokenizer.save_pretrained("score_stage_i_model")
