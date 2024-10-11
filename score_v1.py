@@ -1,6 +1,5 @@
 import os
 import re
-
 import numpy as np
 import torch
 import wandb
@@ -12,8 +11,9 @@ from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
 # Set CUDA device to the first GPU
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+os.environ["CUDA_VISIBLE_DEVICES"] = "3"
 
+# Prompts
 math_prompt = """You are a math expert. When you respond, respond only with the Solution of the final Problem, thinking step by
 step. At the end of the Solution, when you give your final answer, write it in the form 'Final Answer: The final
 answer is $answer$. I hope it is correct.'""" 
@@ -29,29 +29,22 @@ give your final answer, write it in the form 'Final Answer: The final answer is 
 MODEL_NAME = "microsoft/Phi-3-mini-4k-instruct"
 DATASET_NAME = "Sebasdi/math_final_answer"
 BATCH_SIZE = 2
-LEARNING_RATE = 5e-5
+LEARNING_RATE = 5e-6
 NUM_EPOCHS = 3
 MAX_LENGTH = 256 # Tokenization -> input batch seq length
-max_new_tokens = 90 # for online Generation
-BETA1 = 0.1
-BETA2 = 1.0
-ALPHA = 2.0  # 𝛼 is a positive constant multiplier, ideally larger than 1.0
+max_new_tokens = 128 # for online Generation
+BETA1 = 0.01
+BETA2 = 0.1
+ALPHA = 10  # 𝛼 is a positive constant multiplier, ideally larger than 1.0
 comparator = LLMAnswerComparator(threshold=0.9)
 
 
-def extract_final_answer(solution):
+def extract_final_answer(solution: list) -> list:
     pattern = r"Final Answer: The final answer is \$(.*?)\$\ ."  # I hope it is correct\
-    out = []
-    for sol in solution:
-        match = re.search(pattern, sol)
-        if match:
-            out.append(match.group(1))
-        else:
-            out.append(sol)
-    return out
+    return [re.search(pattern, sol).group(1) if re.search(pattern, sol) else sol for sol in solution]
 
 
-def load_model_and_tokenizer(model_name, return_tokenizer=True, quantize=True, lora=True):
+def load_model_and_tokenizer(model_name: str, return_tokenizer: bool = True, quantize: bool = True, lora: bool = True):
     if "Phi" not in model_name:
         print(
             "Warning: 'Phi' not found in model_name! This code is optimized for the Phi models!"
@@ -99,7 +92,7 @@ def load_model_and_tokenizer(model_name, return_tokenizer=True, quantize=True, l
     return model
 
 
-def load_and_prepare_data(dataset_name, tokenizer):
+def load_and_prepare_data(dataset_name: str, tokenizer: AutoTokenizer):
     dataset = load_dataset(dataset_name, split="train")
     test_dataset = load_dataset(dataset_name, split="test")
     test_size = 200
@@ -137,11 +130,11 @@ def load_and_prepare_data(dataset_name, tokenizer):
     return train_dataloader, test_dataloader
 
 
-def compute_kl_divergence(p, q):
+def compute_kl_divergence(p: torch.Tensor, q: torch.Tensor) -> torch.Tensor:
     return torch.sum(p * torch.log(p / q), dim=-1)
 
 
-def reward_bonus(y2, y1, y_star):
+def reward_bonus(y2: list, y1: list, y_star: list) -> float:
     """
     Compute the reward bonus for the second attempt.
     Based on: reward_bonus = (r(y2, y_star) - r(y1, y_star))
@@ -158,15 +151,10 @@ def reward_bonus(y2, y1, y_star):
     return reward_bonus
 
 
-def estimate_reward(y2, y_star, return_correctness=False):
-
+def estimate_reward(y2: list, y_star: list, return_correctness: bool = False) -> torch.Tensor:
     results = comparator.batch_compare(y2, oracle_responses=y_star, method="bert")
-    # results is a list of tuples (similarity, correct)
-    similarities = [result[0] for result in results]
-    correctness = [result[1] for result in results]
-    if return_correctness:
-        return torch.tensor(similarities), torch.tensor(correctness)
-    return torch.tensor(similarities)
+    similarities, correctness = zip(*results)
+    return (torch.tensor(similarities), torch.tensor(correctness)) if return_correctness else torch.tensor(similarities)
 
 
 def train_stage_1(
@@ -180,53 +168,53 @@ def train_stage_1(
     device="cpu",
 ):
     total_loss = 0  # Initialize total_loss here
+    total_correct = 0  # Initialize total correct predictions
+    total_samples = 0  # Initialize total samples for accuracy calculation
+
     for epoch in range(num_epochs):
         model.train()
         epoch_loss = 0  # Initialize epoch_loss for each epoch
 
         for batch in tqdm(dataloader, desc=f"Epoch {epoch + 1}/{num_epochs}"):
             input_ids = batch["input_ids"]
-            input_ids = torch.stack(input_ids)
-            # reshape (max token, batch)-> (batch, max token)
-            input_ids = input_ids.transpose(0, 1).to(device)
+            # reshape (seq_len, batch)-> (batch,seq_len)
+            input_ids = torch.stack(input_ids).transpose(0, 1).to(device)
             attention_mask = batch["attention_mask"]
-            attention_mask = torch.stack(attention_mask)
-            # reshape (max token, batch)-> (batch, max token)
-            attention_mask = attention_mask.transpose(0, 1).to(device)
+            # reshape (seq_len, batch)-> (batch,seq_len)
+            attention_mask = torch.stack(attention_mask).transpose(0, 1).to(device)
 
             solutions = batch["solution"]
 
             # First attempt (trained model) get on-policy action of the train model
-            action1_token = model.generate(input_ids, attention_mask=attention_mask, max_new_tokens=max_new_tokens)
-            # <- our final action (includes the prompt!)
+            action1_token = model.generate(input_ids, attention_mask=attention_mask, max_new_tokens=max_new_tokens, do_sample=True, temperature=1.0)
             action1 = tokenizer.batch_decode(action1_token, skip_special_tokens=True)
 
             input_ids_2 = [a1 + self_correction_prompt for a1 in action1]
-            encodeing_input_ids_2 = tokenizer(input_ids_2, padding="max_length", truncation=True, max_length=MAX_LENGTH, return_tensors="pt",)
+            encodeing_input_ids_2 = tokenizer(input_ids_2, padding="max_length", truncation=True, max_length=MAX_LENGTH, return_tensors="pt")
             input_ids_2 = encodeing_input_ids_2.input_ids.to(device)
             attention_mask_2 = encodeing_input_ids_2.attention_mask.to(device)
-            action2_token = model.generate(input_ids_2, attention_mask=attention_mask_2, max_new_tokens=max_new_tokens)
-            action2 = tokenizer.batch_decode(action2_token, skip_special_tokens=True)
+            action2_token = model.generate(input_ids_2, attention_mask=attention_mask_2, max_new_tokens=max_new_tokens, do_sample=True, temperature=1.0)
 
-            # Now we have the trajectory a1, a2 and we need to calculate the Reward and Loss
 
             # Compute reward:
-            reward = estimate_reward(
-                extract_final_answer(action2), extract_final_answer(solutions)
-            )
+            # Calculate accuracy
+            input_length = input_ids_2.shape[1]
+            # Extract only the newly generated tokens
+            attempt2_answer_tokens = action2_token[:, input_length:]
+            attempt2_answer = tokenizer.batch_decode(attempt2_answer_tokens, skip_special_tokens=True)
+            reward, correct2 = estimate_reward(extract_final_answer(attempt2_answer), extract_final_answer(solutions), return_correctness=True)
 
             # Compute the loss
-            # First attempt (base model) get on-policy action of the base model
-            with torch.no_grad():
-                out_dict_base = base_model.generate(
-                    input_ids,
-                    attention_mask=attention_mask,
-                    max_new_tokens=max_new_tokens,
-                    output_logits=True,
-                    return_dict_in_generate=True,
-                )
-                logits_base_1 = torch.stack(out_dict_base.logits).transpose(0, 1)
-                probs_base_1 = torch.softmax(logits_base_1, dim=-1)
+            out_dict_base = base_model.generate(
+                input_ids,
+                attention_mask=attention_mask,
+                max_new_tokens=max_new_tokens,
+                output_logits=True,
+                return_dict_in_generate=True,
+                do_sample=True, temperature=1.0
+            )
+            logits_base_1 = torch.stack(out_dict_base.logits).transpose(0, 1)
+            probs_base_1 = torch.softmax(logits_base_1, dim=-1)
 
             # Compute logprobs of the first attempt of the trained model
             logits_1 = model(action1_token).logits
@@ -237,10 +225,8 @@ def train_stage_1(
             min_length = min(probs_base_1.size(1), probs_1.size(1))
             kl_div = compute_kl_divergence(probs_base_1[:, :min_length, :], probs_1[:, :min_length, :])
 
-            # Second attempt (trained model)
             outputs_2 = model(action2_token)
             logits_2 = outputs_2.logits
-            # probs_2 = torch.softmax(logits_2, dim=-1)
 
             # Compute policy gradient loss using reward for y2_logits
             log_probs = torch.log_softmax(logits_2, dim=-1)
@@ -256,15 +242,18 @@ def train_stage_1(
             optimizer.step()
 
             total_loss += loss.item()
-
             epoch_loss += loss.item()
+
+            
+            total_correct += correct2.float().sum()
+            total_samples += len(solutions)
+
             print("Loss: ", loss.item())
 
-        print(
-            f"Epoch {epoch + 1}/{num_epochs}, Loss: {epoch_loss / len(dataloader):.4f}"
-        )
+        epoch_accuracy = total_correct / total_samples if total_samples > 0 else 0
+        print(f"Epoch {epoch + 1}/{num_epochs}, Loss: {epoch_loss / len(dataloader):.4f}, Accuracy: {epoch_accuracy:.4f}")
 
-    return model, total_loss
+    return model, total_loss, epoch_accuracy  # Return accuracy along with model and loss
 
 
 def train_stage_2(
@@ -485,7 +474,7 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
     
-    #model.gradient_checkpointing_enable()
+    model.gradient_checkpointing_enable()
 
     # Load the base model for comparison
     base_model = load_model_and_tokenizer(MODEL_NAME, return_tokenizer=False, quantize=True, lora=False).to(device).eval()
@@ -494,8 +483,7 @@ def main():
 
     for i in range(score_iterations):
         # total_reward, accuracy = evaluate_model(model, tokenizer, test_dataloader, device=device)
-
-        model, stage_1_loss = train_stage_1(
+        model, stage_1_loss, stage_1_accuracy = train_stage_1(
             model,
             base_model,
             tokenizer,
@@ -522,9 +510,10 @@ def main():
         wandb.log(
             {
                 "stage_1_loss": stage_1_loss / len(dataloader),
+                "stage_1_accuracy": stage_1_accuracy,  # Log the accuracy
                 # "stage_2_loss": stage_2_loss / len(dataloader),
-                "total_reward": total_reward,
-                "accuracy": accuracy,
+                # "total_reward": total_reward,
+                # "accuracy": accuracy,
             },
             i,
         )
