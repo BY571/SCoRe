@@ -12,14 +12,18 @@ from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
 # Set CUDA device to the first GPU
-os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 math_prompt = """You are a math expert. When you respond, respond only with the Solution of the final Problem, thinking step by
 step. At the end of the Solution, when you give your final answer, write it in the form 'Final Answer: The final
-answer is $answer$. I hope it is correct.'"""
+answer is $answer$. I hope it is correct.'""" 
+# 63 token
 self_correction_prompt = """There might be an error in the solution above because of lack of understanding of the question. Please correct
 the error, if any, and rewrite the solution. Only output the final solution! At the end of the Solution, when you
-give your final answer, write it in the form 'Final Answer: The final answer is $answer$. I hope it is correct.' """
+give your final answer, write it in the form 'Final Answer: The final answer is $answer$. I hope it is correct.' """ 
+# 77 token
+
+# Train dataset has max 912 token and mean of 147 token
 
 # Hyperparameters
 MODEL_NAME = "microsoft/Phi-3-mini-4k-instruct"
@@ -27,7 +31,8 @@ DATASET_NAME = "Sebasdi/math_final_answer"
 BATCH_SIZE = 2
 LEARNING_RATE = 5e-5
 NUM_EPOCHS = 3
-MAX_LENGTH = 512
+MAX_LENGTH = 256 # Tokenization -> input batch seq length
+max_new_tokens = 90 # for online Generation
 BETA1 = 0.1
 BETA2 = 1.0
 ALPHA = 2.0  # 𝛼 is a positive constant multiplier, ideally larger than 1.0
@@ -59,7 +64,7 @@ def load_model_and_tokenizer(model_name, return_tokenizer=True, quantize=True, l
     )
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
-    tokenizer.model_max_length = 1024
+    tokenizer.model_max_length = MAX_LENGTH
     tokenizer.pad_token = (
         tokenizer.unk_token
     )  # use unk rather than eos token to prevent endless generation
@@ -192,13 +197,15 @@ def train_stage_1(
             solutions = batch["solution"]
 
             # First attempt (trained model) get on-policy action of the train model
-            action1_token = model.generate(input_ids, max_new_tokens=256, use_cache=False)
+            action1_token = model.generate(input_ids, attention_mask=attention_mask, max_new_tokens=max_new_tokens)
             # <- our final action (includes the prompt!)
             action1 = tokenizer.batch_decode(action1_token, skip_special_tokens=True)
 
             input_ids_2 = [a1 + self_correction_prompt for a1 in action1]
-            input_ids_2 = tokenizer(input_ids_2, padding="max_length", truncation=True, max_length=MAX_LENGTH, return_tensors="pt",).input_ids
-            action2_token = model.generate(input_ids_2.to(device), max_new_tokens=256, use_cache=False)
+            encodeing_input_ids_2 = tokenizer(input_ids_2, padding="max_length", truncation=True, max_length=MAX_LENGTH, return_tensors="pt",)
+            input_ids_2 = encodeing_input_ids_2.input_ids.to(device)
+            attention_mask_2 = encodeing_input_ids_2.attention_mask.to(device)
+            action2_token = model.generate(input_ids_2, attention_mask=attention_mask_2, max_new_tokens=max_new_tokens)
             action2 = tokenizer.batch_decode(action2_token, skip_special_tokens=True)
 
             # Now we have the trajectory a1, a2 and we need to calculate the Reward and Loss
@@ -214,10 +221,9 @@ def train_stage_1(
                 out_dict_base = base_model.generate(
                     input_ids,
                     attention_mask=attention_mask,
-                    max_new_tokens=256,
+                    max_new_tokens=max_new_tokens,
                     output_logits=True,
                     return_dict_in_generate=True,
-                    use_cache=False,
                 )
                 logits_base_1 = torch.stack(out_dict_base.logits).transpose(0, 1)
                 probs_base_1 = torch.softmax(logits_base_1, dim=-1)
@@ -227,7 +233,6 @@ def train_stage_1(
             probs_1 = torch.softmax(logits_1, dim=-1)
 
             # Compute KL divergence between the first attempt of the base model and the trained model
-
             # Get the minimum length
             min_length = min(probs_base_1.size(1), probs_1.size(1))
             kl_div = compute_kl_divergence(probs_base_1[:, :min_length, :], probs_1[:, :min_length, :])
@@ -296,7 +301,7 @@ def train_stage_2(
                 out_dict_base = base_model.generate(
                     input_ids,
                     attention_mask=attention_mask,
-                    max_new_tokens=MAX_LENGTH,
+                    max_new_tokens=max_new_tokens,
                     output_logits=True,
                     return_dict_in_generate=True,
                 )
@@ -475,19 +480,16 @@ def evaluate_model(model, tokenizer, dataloader, device="cpu"):
 def main():
     wandb.init(project="SCoRe-v1")
     score_iterations = 4
-    model, tokenizer = load_model_and_tokenizer(MODEL_NAME)
+    model, tokenizer = load_model_and_tokenizer(MODEL_NAME, quantize=True, lora=True)
     dataloader, test_dataloader = load_and_prepare_data(DATASET_NAME, tokenizer)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
-    model = torch.compile(model)
+    
+    #model.gradient_checkpointing_enable()
+
     # Load the base model for comparison
-    base_model = (
-        load_model_and_tokenizer(MODEL_NAME, return_tokenizer=False, quantize=True, lora=False)
-        .to(device)
-        .eval()
-    )
-    base_model = torch.compile(base_model)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE)
+    base_model = load_model_and_tokenizer(MODEL_NAME, return_tokenizer=False, quantize=True, lora=False).to(device).eval()
+    optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
     # TODO add scheduler with warmup steps
 
     for i in range(score_iterations):
