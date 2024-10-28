@@ -3,7 +3,7 @@ import re
 import numpy as np
 import torch
 import wandb
-from datasets import concatenate_datasets, load_dataset
+from datasets import load_dataset
 from peft import get_peft_model, LoraConfig, prepare_model_for_kbit_training
 from string_matcher import LLMAnswerComparator
 from torch.utils.data import DataLoader
@@ -11,41 +11,51 @@ from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 import torch.nn.functional as F
 
-#import os
-#os.environ["CUDA_VISIBLE_DEVICES"] = "3"
 
 # Prompts
-math_prompt = """You are a math expert. When you respond, respond only with the Solution of the final Problem, thinking step by
-step. At the end of the Solution, when you give your final answer, write it in the form 'Final Answer: The final
-answer is $answer$. I hope it is correct.'""" 
-# 63 token
+prompt = """You are provided with a sequence of numbers. Your task is to identify the logical pattern within the sequence and provide a logical conclusion of what the next number in the sequence should be.
+You can think and reason about what the answer will be but provide as a final answer only the numerical value and in the following way:
+
+'Final Answer: The final answer is $answer$.'"""
+
 self_correction_prompt = """There might be an error in the solution above because of lack of understanding of the question. Please correct
 the error, if any, and rewrite the solution. Only output the final solution! At the end of the Solution, when you
-give your final answer, write it in the form 'Final Answer: The final answer is $answer$. I hope it is correct.' """ 
-# 77 token
+give your final answer, write it in the form 'Final Answer: The final answer is $answer$.' """ 
 
-# Train dataset has max 912 token and mean of 147 token
 
 # Hyperparameters
-MODEL_NAME = "microsoft/Phi-3-mini-4k-instruct"
-DATASET_NAME = "Sebasdi/math_final_answer"
-BATCH_SIZE = 5
+MODEL_NAME = "microsoft/Phi-3-mini-4k-instruct" #HF1BitLLM/Llama3-8B-1.58-100B-tokens  microsoft/Phi-3-mini-4k-instruct
+DATASET_NAME = "Sebasdi/score_toy_dataset"
+BATCH_SIZE = 11
 LEARNING_RATE = 5e-6
-NUM_EPOCHS = 3
-MAX_LENGTH_BATCH = 1000 # Tokenization -> input batch seq length
-mnt_attempt1 = 300
-mnt_attempt2 = 300
-x2_max_batch_len = 1300
+NUM_EPOCHS = 10
+MAX_LENGTH_BATCH = 150 # Tokenization -> input batch seq length
+mnt_attempt1 = 75
+mnt_attempt2 = 75
+x2_max_batch_len = 250
 BETA1 = 0.01
 BETA2 = 0.1
 ALPHA = 10  # 𝛼 is a positive constant multiplier, ideally larger than 1.0
 comparator = LLMAnswerComparator(threshold=0.9)
 
+def extract_final_answers(answers):
+    return [extract_final_answer(a) for a in answers]
+def extract_final_answer(text):
+    """
+    Extracts the final answer from a string formatted as:
+    'Final Answer: The final answer is $answer$.'
 
-def extract_final_answer(solution: list) -> list:
-    pattern = r"Final Answer: The final answer is \$(.*?)\$\ ."  # I hope it is correct\
-    return [re.search(pattern, sol).group(1) if re.search(pattern, sol) else sol for sol in solution]
+    Parameters:
+    text (str): The model output containing the final answer.
 
+    Returns:
+    int or None: The extracted final answer as an integer, or None if not found.
+    """
+    # Regular expression to capture the answer after "The final answer is"
+    match = re.search(r"The final answer is (\d+)", text)
+    
+    # Return the answer as an integer if found, otherwise None
+    return int(match.group(1)) if match else None
 
 def load_model_and_tokenizer(model_name: str, return_tokenizer: bool = True, quantize: bool = True, lora: bool = True):
     if "Phi" not in model_name:
@@ -98,40 +108,36 @@ def load_model_and_tokenizer(model_name: str, return_tokenizer: bool = True, qua
 
 def load_and_prepare_data(dataset_name: str, tokenizer: AutoTokenizer):
     dataset = load_dataset(dataset_name, split="train")
-    test_dataset = load_dataset(dataset_name, split="test")
-    test_size = 200
 
-    # update sizes
-    # Take 500 examples from the test set for our new test set
-    new_test_dataset = test_dataset.select(range(test_size))
+    sequence_prompt = """\n\nHere is your the sequence you need to find the logical continuation for:\n{sequence}"""
 
-    # Use the remaining 4500 examples from the test set
-    remaining_test = test_dataset.select(range(test_size, len(test_dataset)))
-
-    # Combine the original train set with the remaining 4500 from the test set
-    dataset = concatenate_datasets([dataset, remaining_test])
-    test_dataset = new_test_dataset
-
-    def tokenize_function(examples):
+    # def tokenize_function(examples, tokenizer):
+    #     # add the math preprompt to all problems
+    #     examples["sequence"] = [prompt + sequence_prompt.format(sequence=seq) for seq in examples["sequence"]]
+    #     return tokenizer(
+    #         examples["sequence"],
+    #         truncation=True,
+    #         padding=True,
+    #         return_tensors="pt",
+    #     )
+    def apply_chat_template(examples, tokenizer):
         # add the math preprompt to all problems
-        examples["problem"] = [math_prompt + problem for problem in examples["problem"]]
-        return tokenizer(
-            examples["problem"],
-            truncation=True,
-            padding="max_length",
-            max_length=MAX_LENGTH_BATCH,
-            return_tensors="pt",
-        )
+        messages = [[{"role": "user",
+                     "content": prompt + sequence_prompt.format(sequence=seq)} ]for seq in examples["sequence"]] 
 
-    tokenized_dataset = dataset.map(tokenize_function, batched=True)
-    tokenized_test_dataset = test_dataset.map(tokenize_function, batched=True)
+        return tokenizer.apply_chat_template(
+        messages, tokenize=True, add_generation_prompt=True, return_dict=True, return_tensors="pt", padding=True, truncation=True)
 
+    # Max length is 113 with padding!
+    tokenized_dataset = dataset.map(apply_chat_template,
+                                    fn_kwargs={"tokenizer": tokenizer},
+                                    batched=True)
+    tokenized_dataset = tokenized_dataset.remove_columns(["explanation", "sequence"]) # remove explanation
     train_dataloader = DataLoader(
         tokenized_dataset, batch_size=BATCH_SIZE, shuffle=True
     )
-    test_dataloader = DataLoader(tokenized_test_dataset, batch_size=1, shuffle=False)
 
-    return train_dataloader, test_dataloader
+    return train_dataloader
 
 
 def compute_kl_divergence(p: torch.Tensor, q: torch.Tensor) -> torch.Tensor:
@@ -155,10 +161,10 @@ def reward_bonus(y2: list, y1: list, y_star: list) -> float:
     return reward_bonus
 
 
-def estimate_reward(y2: list, y_star: list, return_correctness: bool = False) -> torch.Tensor:
-    results = comparator.batch_compare(y2, oracle_responses=y_star, method="bert")
-    similarities, correctness = zip(*results)
-    return (torch.tensor(similarities), torch.tensor(correctness)) if return_correctness else torch.tensor(similarities)
+def estimate_reward(y2: list, solutions: list) -> torch.Tensor:
+    answers = extract_final_answers(y2)
+    rewards = [1 if a == s else 0 for (a, s) in zip(answers, solutions)]
+    return np.mean(rewards).item()
 
 
 def train_stage_1(
@@ -181,7 +187,7 @@ def train_stage_1(
         mean_reward_a1 = []
         mean_reward_a2 = []
         i = 0
-        for i, batch in tqdm(enumerate(dataloader), total=len(dataloader), desc=f"Stage 1 Training {i+1}/{total_batches}"):
+        for i, batch in tqdm(enumerate(dataloader), total=total_batches, desc=f"Stage 1 Training {i+1}/{total_batches}"):
             x1 = batch["input_ids"]
             # reshape (seq_len, batch)-> (batch,seq_len)
             x1 = torch.stack(x1).transpose(0, 1).to(model.device)
@@ -189,18 +195,19 @@ def train_stage_1(
             # reshape (seq_len, batch)-> (batch,seq_len)
             attention_mask = torch.stack(attention_mask).transpose(0, 1).to(model.device)
 
-            solutions = batch["solution"]
+            solutions = batch["correct_answer"]
 
             # First attempt (trained model) get on-policy action of the train model
-            action1_token = model.generate(x1,
-                                           attention_mask=attention_mask,
-                                           max_new_tokens=mnt_attempt1,
-                                           use_cache=True,
-                                           do_sample=True,
-                                           temperature=1.0)
+            with torch.no_grad():
+                action1_token = model.generate(x1,
+                                            attention_mask=attention_mask,
+                                            max_new_tokens=mnt_attempt1,
+                                            use_cache=True,
+                                            do_sample=True,
+                                            temperature=1.0)
             action1 = tokenizer.batch_decode(action1_token, skip_special_tokens=True)
-            reward1, correct1 = estimate_reward(extract_final_answer(action1), extract_final_answer(solutions), return_correctness=True)
-            mean_reward_a1.append(reward1.mean().item())
+            reward1 = estimate_reward(action1, solutions)
+            mean_reward_a1.append(reward1)
 
             x2 = [a1 + self_correction_prompt for a1 in action1]
             x2_encoded = tokenizer(x2,
@@ -224,8 +231,8 @@ def train_stage_1(
             # Extract only the newly generated tokens
             attempt2_answer_tokens = action2_token[:, input_length:]
             attempt2_answer = tokenizer.batch_decode(attempt2_answer_tokens, skip_special_tokens=True)
-            reward2, correct2 = estimate_reward(extract_final_answer(attempt2_answer), extract_final_answer(solutions), return_correctness=True)
-            mean_reward_a2.append(reward2.mean().item())
+            reward2 = estimate_reward(attempt2_answer, solutions)
+            mean_reward_a2.append(reward2)
 
             # Compute the loss
             with torch.no_grad():
@@ -249,7 +256,7 @@ def train_stage_1(
 
 
             # Compute the loss
-            loss = -action_log_probs * (reward2.mean() + beta2 * torch.mean(kl_div).to("cpu"))
+            loss = -action_log_probs * (reward2 + beta2 * torch.mean(kl_div).to("cpu"))
 
             optimizer.zero_grad()
             loss.backward()
@@ -258,8 +265,6 @@ def train_stage_1(
             total_loss += loss.item()
             epoch_loss += loss.item()
 
-            
-            total_correct += correct2.float().sum()
             total_samples += len(solutions)
 
             print("Loss: ", loss.item())
@@ -489,12 +494,12 @@ def evaluate_model(model, tokenizer, dataloader, device="cpu"):
 
 
 def main():
-    wandb.init(project="SCoRe-v1")
+    wandb.init(project="SCoRe-v1-toy")
     model, tokenizer = load_model_and_tokenizer(MODEL_NAME, quantize=True, lora=True)
-    dataloader, test_dataloader = load_and_prepare_data(DATASET_NAME, tokenizer)
+    dataloader = load_and_prepare_data(DATASET_NAME, tokenizer)
     
     # Load the base model for comparison
-    base_model = load_model_and_tokenizer(MODEL_NAME, return_tokenizer=False, quantize=True, lora=False).eval() #.to(device)
+    base_model = load_model_and_tokenizer(MODEL_NAME, return_tokenizer=False, quantize=True, lora=False).eval()
     optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
 
     for param in base_model.parameters():
@@ -502,8 +507,6 @@ def main():
 
     total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print("trainable parameter: ", total_params)
-
-    # total_reward, accuracy = evaluate_model(model, tokenizer, test_dataloader, device=device)
 
     model= train_stage_1(
         model=model,
