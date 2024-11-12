@@ -35,7 +35,7 @@ python score_toy.py
 
 ## Run SoRE on Math Probelm
 
-
 ```
 python score_math.py
 ```
+`dataset_relabel.py` was used to add final answer pattern: ```'Final Answer: The final answer is $answer$. I hope it is correct.'``` 
