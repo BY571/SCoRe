@@ -1,4 +1,3 @@
-import os
 import re
 
 import numpy as np
@@ -7,7 +6,6 @@ import torch.nn.functional as F
 import wandb
 from datasets import load_dataset
 from peft import get_peft_model, LoraConfig, prepare_model_for_kbit_training
-from string_matcher import LLMAnswerComparator
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
@@ -25,19 +23,20 @@ give your final answer, write it in the form 'Final Answer: The final answer is 
 
 
 # Hyperparameters
-MODEL_NAME = "microsoft/Phi-3-mini-4k-instruct"  # HF1BitLLM/Llama3-8B-1.58-100B-tokens  microsoft/Phi-3-mini-4k-instruct
+MODEL_NAME = "microsoft/Phi-3-mini-4k-instruct"
 DATASET_NAME = "Sebasdi/score_toy_dataset"
-BATCH_SIZE = 11
+BATCH_SIZE = 5
 LEARNING_RATE = 5e-6
 NUM_EPOCHS = 10
 MAX_LENGTH_BATCH = 150  # Tokenization -> input batch seq length
 mnt_attempt1 = 75
 mnt_attempt2 = 75
 x2_max_batch_len = 250
+stage_1_epochs = 30
+stage_2_epochs = 100
 BETA1 = 0.01
 BETA2 = 0.1
 ALPHA = 10  # 𝛼 is a positive constant multiplier, ideally larger than 1.0
-comparator = LLMAnswerComparator(threshold=0.9)
 
 
 def extract_final_answers(answers):
@@ -151,10 +150,6 @@ def load_and_prepare_data(dataset_name: str, tokenizer: AutoTokenizer):
     return train_dataloader
 
 
-def compute_kl_divergence(p: torch.Tensor, q: torch.Tensor) -> torch.Tensor:
-    return torch.sum(p * torch.log(p / q), dim=-1)
-
-
 def reward_bonus(y2: list, y1: list, solutions: list) -> float:
     """
     Compute the reward bonus for the second attempt.
@@ -187,13 +182,12 @@ def train_stage_1(
     optimizer,
     beta2,
 ):
-    total_loss = 0  # Initialize total_loss here
-    total_correct = 0  # Initialize total correct predictions
-    total_samples = 0  # Initialize total samples for accuracy calculation
+    total_loss = 0
+    total_samples = 0
 
     for epoch in range(num_epochs):
         model.train()
-        epoch_loss = 0  # Initialize epoch_loss for each epoch
+        epoch_loss = 0
         total_batches = len(dataloader)
         mean_reward_a1 = []
         mean_reward_a2 = []
@@ -204,10 +198,10 @@ def train_stage_1(
             desc=f"Stage 1 Training {i+1}/{total_batches}",
         ):
             x1 = batch["input_ids"]
-            # reshape (seq_len, batch)-> (batch,seq_len)
+            # reshape (seq_len, batch)-> (batch, seq_len)
             x1 = torch.stack(x1).transpose(0, 1).to(model.device)
             attention_mask = batch["attention_mask"]
-            # reshape (seq_len, batch)-> (batch,seq_len)
+            # reshape (seq_len, batch)-> (batch, seq_len)
             attention_mask = (
                 torch.stack(attention_mask).transpose(0, 1).to(model.device)
             )
@@ -247,8 +241,6 @@ def train_stage_1(
                 temperature=1.0,
             )
 
-            # Compute reward:
-            # Calculate accuracy
             input_length = input_ids_2.shape[1]
             # Extract only the newly generated tokens
             attempt2_answer_tokens = action2_token[:, input_length:]
@@ -292,11 +284,8 @@ def train_stage_1(
 
             total_samples += len(solutions)
 
-            print("Loss: ", loss.item())
-
-        epoch_accuracy = total_correct / total_samples if total_samples > 0 else 0
         print(
-            f"Epoch {epoch + 1}/{num_epochs}, Loss: {epoch_loss / len(dataloader):.4f}, Accuracy: {epoch_accuracy:.4f}"
+            f"Epoch {epoch + 1}/{num_epochs}, Loss: {epoch_loss / len(dataloader):.4f}"
         )
         mean_reward_attempt_1 = np.mean(mean_reward_a1)
         mean_reward_attempt_2 = np.mean(mean_reward_a2)
@@ -324,12 +313,11 @@ def train_stage_2(
     alpha,
 ):
 
-    total_loss = 0  # Initialize total_loss here
-    total_correct = 0  # Initialize total correct predictions
-    total_samples = 0  # Initialize total samples for accuracy calculation
+    total_loss = 0
+    total_samples = 0
     for epoch in range(num_epochs):
         model.train()
-        epoch_loss = 0  # Initialize epoch_loss for each epoch
+        epoch_loss = 0
         total_batches = len(dataloader)
         mean_reward_a1 = []
         mean_reward_a2 = []
@@ -340,10 +328,10 @@ def train_stage_2(
             desc=f"Stage 2 Training {i+1}/{total_batches}",
         ):
             x1 = batch["input_ids"]
-            # reshape (seq_len, batch)-> (batch,seq_len)
+            # reshape (seq_len, batch)-> (batch, seq_len)
             x1 = torch.stack(x1).transpose(0, 1).to(model.device)
             attention_mask = batch["attention_mask"]
-            # reshape (seq_len, batch)-> (batch,seq_len)
+            # reshape (seq_len, batch)-> (batch, seq_len)
             attention_mask = (
                 torch.stack(attention_mask).transpose(0, 1).to(model.device)
             )
@@ -383,8 +371,6 @@ def train_stage_2(
                 temperature=1.0,
             )
 
-            # Compute reward:
-            # Calculate accuracy
             input_length = input_ids_2.shape[1]
             # Extract only the newly generated tokens
             attempt2_answer_tokens = action2_token[:, input_length:]
@@ -394,16 +380,21 @@ def train_stage_2(
             reward2 = estimate_reward(attempt2_answer, solutions)
             mean_reward_a2.append(reward2)
 
-            # Compute the loss
+            # Compute kl + logprobs of the first attempt 
             with torch.no_grad():
                 base_logits = base_model(x1, attention_mask=attention_mask).logits
                 probs_base_1 = torch.softmax(base_logits, dim=-1)
 
-            # Compute logprobs of the first attempt of the trained model
             logits_1 = model(x1, attention_mask=attention_mask).logits
             probs_1 = torch.softmax(logits_1, dim=-1)
             kl_div_1 = F.kl_div(probs_1, probs_base_1, reduction="mean")
 
+            log_probs_1 = torch.log_softmax(logits_1, dim=-1)
+            action_log_probs_1 = (
+                torch.gather(log_probs_1, -1, x1.unsqueeze(-1)).sum(1).mean()
+            )
+
+            # Compute kl + logprobs + reward bonus of the second attempt 
             with torch.no_grad():
                 base_logits = base_model(attempt2_answer_tokens).logits
                 probs_base_2 = torch.softmax(base_logits, dim=-1)
@@ -412,7 +403,7 @@ def train_stage_2(
             probs_2 = torch.softmax(logits_2, dim=-1)
             kl_div_2 = F.kl_div(probs_2, probs_base_2, reduction="mean")
 
-            # Estimate reward
+            # Compute reward 2
             reward_boni = reward_bonus(attempt2_answer, action1, solutions)
             reward2 = reward2 + alpha * reward_boni
 
@@ -422,11 +413,6 @@ def train_stage_2(
                 torch.gather(log_probs_2, -1, attempt2_answer_tokens.unsqueeze(-1))
                 .sum(1)
                 .mean()
-            )
-
-            log_probs_1 = torch.log_softmax(logits_1, dim=-1)
-            action_log_probs_1 = (
-                torch.gather(log_probs_1, -1, x1.unsqueeze(-1)).sum(1).mean()
             )
 
             episode_action_log_probs = action_log_probs_1 + action_log_probs_2
@@ -443,8 +429,6 @@ def train_stage_2(
             epoch_loss += loss.item()
 
             total_samples += len(solutions)
-
-            print("Loss: ", loss.item())
 
         print(
             f"Epoch {epoch + 1}/{num_epochs}, Loss: {epoch_loss / len(dataloader):.4f}"
@@ -463,16 +447,17 @@ def train_stage_2(
 
 
 def main():
-    wandb.init(project="SCoRe-v1-toy")
+    wandb.init(project="SCoRe-toy")
     model, tokenizer = load_model_and_tokenizer(MODEL_NAME, quantize=True, lora=True)
     dataloader = load_and_prepare_data(DATASET_NAME, tokenizer)
 
     # Load the base model for comparison
     base_model = load_model_and_tokenizer(
-        MODEL_NAME, return_tokenizer=False, quantize=True, lora=False
+        MODEL_NAME, return_tokenizer=False, quantize=False, lora=False
     ).eval()
     optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
 
+    # Freeze the base model parameters
     for param in base_model.parameters():
         param.requires_grad = False
 
@@ -484,7 +469,7 @@ def main():
         base_model=base_model,
         tokenizer=tokenizer,
         dataloader=dataloader,
-        num_epochs=30,
+        num_epochs=stage_1_epochs,
         optimizer=optimizer,
         beta2=BETA2,
     )
@@ -494,7 +479,7 @@ def main():
         base_model=base_model,
         tokenizer=tokenizer,
         dataloader=dataloader,
-        num_epochs=100,
+        num_epochs=stage_2_epochs,
         optimizer=optimizer,
         beta1=BETA1,
         alpha=ALPHA,
