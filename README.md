@@ -33,7 +33,7 @@ pip install -r requirements.txt
 python score_toy.py
 ```
 
-## Run SoRE on Math Probelm
+## Run SCoRe on Math Probelm
 
 ```
 python score_math.py
