@@ -27,7 +27,6 @@ MODEL_NAME = "microsoft/Phi-3-mini-4k-instruct"
 DATASET_NAME = "Sebasdi/score_toy_dataset"
 BATCH_SIZE = 5
 LEARNING_RATE = 5e-6
-NUM_EPOCHS = 10
 MAX_LENGTH_BATCH = 150  # Tokenization -> input batch seq length
 mnt_attempt1 = 75
 mnt_attempt2 = 75
@@ -183,8 +182,6 @@ def train_stage_1(
     beta2,
 ):
     total_loss = 0
-    total_samples = 0
-
     for epoch in range(num_epochs):
         model.train()
         epoch_loss = 0
@@ -255,7 +252,7 @@ def train_stage_1(
                 base_logits = base_model(x1, attention_mask=attention_mask).logits
                 probs_base_1 = torch.softmax(base_logits, dim=-1)
 
-            # Compute logprobs of the first attempt of the trained model
+            # Compute probs of the first attempt
             logits_1 = model(x1, attention_mask=attention_mask).logits
             probs_1 = torch.softmax(logits_1, dim=-1)
 
@@ -273,7 +270,7 @@ def train_stage_1(
             )
 
             # Compute the loss
-            loss = -action_log_probs * (reward2 + beta2 * torch.mean(kl_div).to("cpu"))
+            loss = -action_log_probs * (reward2 + beta2 * kl_div.to("cpu"))
 
             optimizer.zero_grad()
             loss.backward()
@@ -281,8 +278,6 @@ def train_stage_1(
 
             total_loss += loss.item()
             epoch_loss += loss.item()
-
-            total_samples += len(solutions)
 
         print(
             f"Epoch {epoch + 1}/{num_epochs}, Loss: {epoch_loss / len(dataloader):.4f}"
@@ -314,7 +309,6 @@ def train_stage_2(
 ):
 
     total_loss = 0
-    total_samples = 0
     for epoch in range(num_epochs):
         model.train()
         epoch_loss = 0
@@ -380,7 +374,7 @@ def train_stage_2(
             reward2 = estimate_reward(attempt2_answer, solutions)
             mean_reward_a2.append(reward2)
 
-            # Compute kl + logprobs of the first attempt 
+            # Compute kl + logprobs of the first attempt
             with torch.no_grad():
                 base_logits = base_model(x1, attention_mask=attention_mask).logits
                 probs_base_1 = torch.softmax(base_logits, dim=-1)
@@ -394,7 +388,7 @@ def train_stage_2(
                 torch.gather(log_probs_1, -1, x1.unsqueeze(-1)).sum(1).mean()
             )
 
-            # Compute kl + logprobs + reward bonus of the second attempt 
+            # Compute kl + logprobs + reward bonus of the second attempt
             with torch.no_grad():
                 base_logits = base_model(attempt2_answer_tokens).logits
                 probs_base_2 = torch.softmax(base_logits, dim=-1)
@@ -427,8 +421,6 @@ def train_stage_2(
 
             total_loss += loss.item()
             epoch_loss += loss.item()
-
-            total_samples += len(solutions)
 
         print(
             f"Epoch {epoch + 1}/{num_epochs}, Loss: {epoch_loss / len(dataloader):.4f}"

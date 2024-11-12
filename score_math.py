@@ -29,11 +29,12 @@ MODEL_NAME = "microsoft/Phi-3-mini-4k-instruct"
 DATASET_NAME = "Sebasdi/math_final_answer"
 BATCH_SIZE = 2
 LEARNING_RATE = 5e-6
-NUM_EPOCHS = 3
 MAX_LENGTH_BATCH = 1000  # Tokenization -> input batch seq length
-mnt_attempt1 = 300
-mnt_attempt2 = 300
-x2_max_batch_len = 1300
+mnt_attempt1 = 500
+mnt_attempt2 = 500
+x2_max_batch_len = 1500
+stage_1_epochs = 1
+stage_2_epochs = 1
 BETA1 = 0.01
 BETA2 = 0.1
 ALPHA = 10  # 𝛼 is a positive constant multiplier, ideally larger than 1.0
@@ -41,7 +42,7 @@ comparator = LLMAnswerComparator(threshold=0.9)
 
 
 def extract_final_answer(solution: list) -> list:
-    pattern = r"Final Answer: The final answer is \$(.*?)\$\ ."  # I hope it is correct\
+    pattern = r"Final Answer: The final answer is \$(.*?)\$\ ."
     return [
         re.search(pattern, sol).group(1) if re.search(pattern, sol) else sol
         for sol in solution
@@ -177,9 +178,7 @@ def train_stage_1(
     optimizer,
     beta2,
 ):
-    total_loss = 0  # Initialize total_loss here
-    total_correct = 0  # Initialize total correct predictions
-    total_samples = 0  # Initialize total samples for accuracy calculation
+    total_loss = 0
 
     for epoch in range(num_epochs):
         model.train()
@@ -240,8 +239,6 @@ def train_stage_1(
                 temperature=1.0,
             )
 
-            # Compute reward:
-            # Calculate accuracy
             input_length = input_ids_2.shape[1]
             # Extract only the newly generated tokens
             attempt2_answer_tokens = action2_token[:, input_length:]
@@ -260,7 +257,7 @@ def train_stage_1(
                 base_logits = base_model(x1, attention_mask=attention_mask).logits
                 probs_base_1 = torch.softmax(base_logits, dim=-1)
 
-            # Compute logprobs of the first attempt of the trained model
+            # Compute probs of the first attempt
             logits_1 = model(x1, attention_mask=attention_mask).logits
             probs_1 = torch.softmax(logits_1, dim=-1)
 
@@ -289,14 +286,8 @@ def train_stage_1(
             total_loss += loss.item()
             epoch_loss += loss.item()
 
-            total_correct += correct2.float().sum()
-            total_samples += len(solutions)
-
-            print("Loss: ", loss.item())
-
-        epoch_accuracy = total_correct / total_samples if total_samples > 0 else 0
         print(
-            f"Epoch {epoch + 1}/{num_epochs}, Loss: {epoch_loss / len(dataloader):.4f}, Accuracy: {epoch_accuracy:.4f}"
+            f"Epoch {epoch + 1}/{num_epochs}, Loss: {epoch_loss / len(dataloader):.4f}"
         )
         mean_reward_attempt_1 = np.mean(mean_reward_a1)
         mean_reward_attempt_2 = np.mean(mean_reward_a2)
@@ -322,215 +313,151 @@ def train_stage_2(
     optimizer,
     beta1,
     alpha,
-    device="cpu",
 ):
 
-    total_loss = 0  # Initialize total_loss here
+    total_loss = 0
     for epoch in range(num_epochs):
         model.train()
-        epoch_loss = 0  # Initialize epoch_loss for each epoch
-
-        for batch in tqdm(dataloader, desc=f"Epoch {epoch + 1}/{num_epochs}"):
-            input_ids = batch["input_ids"]
-            input_ids = torch.stack(input_ids)
-            # reshape (max token, batch)-> (batch, max token)
-            input_ids = input_ids.transpose(0, 1).to(device)
+        epoch_loss = 0
+        total_batches = len(dataloader)
+        mean_reward_a1 = []
+        mean_reward_a2 = []
+        i = 0
+        for i, batch in tqdm(
+            enumerate(dataloader),
+            total=total_batches,
+            desc=f"Stage 2 Training {i+1}/{total_batches}",
+        ):
+            x1 = batch["input_ids"]
+            # reshape (seq_len, batch)-> (batch, seq_len)
+            x1 = torch.stack(x1).transpose(0, 1).to(model.device)
             attention_mask = batch["attention_mask"]
-            attention_mask = torch.stack(attention_mask)
-            # reshape (max token, batch)-> (batch, max token)
-            attention_mask = attention_mask.transpose(0, 1).to(device)
+            # reshape (seq_len, batch)-> (batch, seq_len)
+            attention_mask = (
+                torch.stack(attention_mask).transpose(0, 1).to(model.device)
+            )
 
             solutions = batch["solution"]
 
-            # First attempt (base model)
+            # First attempt (trained model) get on-policy action of the train model
             with torch.no_grad():
-                out_dict_base = base_model.generate(
-                    input_ids,
+                action1_token = model.generate(
+                    x1,
                     attention_mask=attention_mask,
-                    max_new_tokens=max_new_tokens,
-                    output_logits=True,
-                    return_dict_in_generate=True,
+                    max_new_tokens=mnt_attempt1,
+                    use_cache=True,
+                    do_sample=True,
+                    temperature=1.0,
                 )
-                logits_base_1 = torch.stack(out_dict_base.logits).transpose(0, 1)
-                probs_base_1 = torch.softmax(logits_base_1, dim=-1)
+            action1 = tokenizer.batch_decode(action1_token, skip_special_tokens=True)
+            reward1 = estimate_reward(action1, solutions)
+            mean_reward_a1.append(reward1)
 
-            # First attempt (trained model)
-            outputs_1 = model(input_ids, attention_mask=attention_mask)
-            logits_1 = outputs_1.logits
-            probs_1 = torch.softmax(logits_1, dim=-1)
-
-            # Add check for correctnes (interaction with "the environment")
-            # 1. transform to words
-            attempt1_probs = torch.argmax(probs_1, dim=-1)
-            attempt1 = tokenizer.batch_decode(attempt1_probs, skip_special_tokens=True)
-
-            kl_div = compute_kl_divergence(probs_base_1, probs_1)
-            # Generate second attempt responses
-            y1 = torch.argmax(probs_1, dim=-1)
-            y1_decoded = tokenizer.batch_decode(y1, skip_special_tokens=True)
-            # Estimate reward
-            reward_1 = estimate_reward(y1_decoded, solutions)
-            reward_1 = -(torch.mean(reward_1) - beta1 * torch.mean(kl_div))
-
-            correction_inputs = [
-                attempt + self_correction_prompt for attempt in attempt1
-            ]
-            correction_encodings = tokenizer(
-                correction_inputs,
-                truncation=True,
+            x2 = [a1 + self_correction_prompt for a1 in action1]
+            x2_encoded = tokenizer(
+                x2,
                 padding="max_length",
-                max_length=MAX_LENGTH,
+                truncation=True,
+                max_length=x2_max_batch_len,
                 return_tensors="pt",
             )
-
-            # Combine original input_ids with correction_encodings
-            combined_input_ids = torch.cat(
-                (input_ids, correction_encodings["input_ids"].to(device)), dim=1
+            input_ids_2 = x2_encoded.input_ids.to(model.device)
+            attention_mask_2 = x2_encoded.attention_mask.to(model.device)
+            action2_token = model.generate(
+                input_ids_2,
+                attention_mask=attention_mask_2,
+                max_new_tokens=mnt_attempt2,
+                use_cache=True,
+                do_sample=True,
+                temperature=1.0,
             )
-            combined_attention_mask = torch.cat(
-                (attention_mask, correction_encodings["attention_mask"].to(device)),
-                dim=1,
-            )
 
-            # Second attempt (base model)
+            input_length = input_ids_2.shape[1]
+            # Extract only the newly generated tokens
+            attempt2_answer_tokens = action2_token[:, input_length:]
+            attempt2_answer = tokenizer.batch_decode(
+                attempt2_answer_tokens, skip_special_tokens=True
+            )
+            reward2 = estimate_reward(attempt2_answer, solutions)
+            mean_reward_a2.append(reward2)
+
+            # Compute kl + logprobs of the first attempt
             with torch.no_grad():
-                outputs_base_2 = base_model.generate(
-                    combined_input_ids,
-                    max_new_tokens=1000,
-                    output_logits=True,
-                    return_dict_in_generate=True,
-                )
-                logits_base_2 = torch.stack(out_dict_base.logits).transpose(0, 1)
-                probs_base_2 = torch.softmax(logits_base_2, dim=-1)
+                base_logits = base_model(x1, attention_mask=attention_mask).logits
+                probs_base_1 = torch.softmax(base_logits, dim=-1)
 
-            # Second attempt (trained model)
-            outputs_2 = model(
-                combined_input_ids, attention_mask=combined_attention_mask
+            logits_1 = model(x1, attention_mask=attention_mask).logits
+            probs_1 = torch.softmax(logits_1, dim=-1)
+            kl_div_1 = F.kl_div(probs_1, probs_base_1, reduction="mean")
+
+            log_probs_1 = torch.log_softmax(logits_1, dim=-1)
+            action_log_probs_1 = (
+                torch.gather(log_probs_1, -1, x1.unsqueeze(-1)).sum(1).mean()
             )
-            logits_2 = outputs_2.logits
+
+            # Compute kl + logprobs + reward bonus of the second attempt
+            with torch.no_grad():
+                base_logits = base_model(attempt2_answer_tokens).logits
+                probs_base_2 = torch.softmax(base_logits, dim=-1)
+
+            logits_2 = model(attempt2_answer_tokens).logits
             probs_2 = torch.softmax(logits_2, dim=-1)
+            kl_div_2 = F.kl_div(probs_2, probs_base_2, reduction="mean")
 
-            # Compute KL divergence between the first attempt of the base model and the trained model
-            kl_div = compute_kl_divergence(probs_base_2, probs_2)
+            # Compute reward 2
+            reward_boni = reward_bonus(attempt2_answer, action1, solutions)
+            reward2 = reward2 + alpha * reward_boni
 
-            # Generate second attempt responses
-            y2 = torch.argmax(probs_2, dim=-1)
-            y2_decoded = tokenizer.batch_decode(y2, skip_special_tokens=True)
+            # Compute policy gradient loss using reward for y2_logits
+            log_probs_2 = torch.log_softmax(logits_2, dim=-1)
+            action_log_probs_2 = (
+                torch.gather(log_probs_2, -1, attempt2_answer_tokens.unsqueeze(-1))
+                .sum(1)
+                .mean()
+            )
 
-            # Estimate reward
-            reward_2 = estimate_reward(y2_decoded, solutions)
-            reward_boni = reward_bonus(y2_decoded, y1_decoded, solutions)
-            reward_2 = reward_2 + alpha * reward_boni
-
-            action_log_probs = torch.log(
-                torch.gather(probs_2, -1, y2.unsqueeze(-1))
-            ).to("cpu")
-            reward_2 = -(torch.mean(reward_2) * -BETA1 * torch.mean(kl_div))
+            episode_action_log_probs = action_log_probs_1 + action_log_probs_2
 
             # Compute loss
-            loss = (reward_1 + reward_2) * torch.mean(action_log_probs)
+            loss = -episode_action_log_probs * (
+                (reward2 + beta1 * kl_div_2) + (reward1 + beta1 * kl_div_1)
+            )
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
 
             total_loss += loss.item()
-
             epoch_loss += loss.item()
 
         print(
             f"Epoch {epoch + 1}/{num_epochs}, Loss: {epoch_loss / len(dataloader):.4f}"
         )
+        mean_reward_attempt_1 = np.mean(mean_reward_a1)
+        mean_reward_attempt_2 = np.mean(mean_reward_a2)
 
-    return model, total_loss
+        diff_at1_at2 = mean_reward_attempt_2 - mean_reward_attempt_1
+        wandb.log(
+            {
+                "stage2/mr_attempt1": mean_reward_attempt_1,
+                "stage2/mr_attempt2": mean_reward_attempt_2,
+                "stage2/difference_at1_at2": diff_at1_at2,
+            }
+        )
 
 
-def evaluate_model(model, tokenizer, dataloader, device="cpu"):
-    model.eval()
-    total_reward = 0
-    total_samples = 0
-    correct_answers = []
-
-    with torch.no_grad():
-        for batch in tqdm(dataloader, desc="Evaluating"):
-            input_ids = batch["input_ids"]
-            input_ids = torch.stack(input_ids)
-            input_ids = input_ids.transpose(0, 1).to(device)
-            attention_mask = batch["attention_mask"]
-            attention_mask = torch.stack(attention_mask)
-            attention_mask = attention_mask.transpose(0, 1).to(device)
-
-            solutions = batch["solution"]
-
-            # First attempt (trained model)
-            outputs = model(input_ids, attention_mask=attention_mask)
-            logits = outputs.logits
-            probs = torch.softmax(logits, dim=-1)
-
-            y_pred = torch.argmax(probs, dim=-1)
-            y_pred_decoded = tokenizer.batch_decode(y_pred, skip_special_tokens=True)
-
-            reward, correct = estimate_reward(
-                extract_final_answer(y_pred_decoded),
-                extract_final_answer(solutions),
-                return_correctness=True,
-            )
-
-            if correct.item() == 1:
-                correct_answers.append(correct)
-                total_reward += torch.sum(reward).item()
-                total_samples += len(solutions)
-                continue
-            else:
-                # Second attempt (trained model)
-                correction_inputs = [
-                    attempt + self_correction_prompt for attempt in y_pred_decoded
-                ]
-                correction_encodings = tokenizer(
-                    correction_inputs,
-                    truncation=True,
-                    padding="max_length",
-                    max_length=MAX_LENGTH,
-                    return_tensors="pt",
-                )
-                # Combine original input_ids with correction_encodings
-                combined_input_ids = torch.cat(
-                    (input_ids, correction_encodings["input_ids"].to(device)), dim=1
-                )
-                combined_attention_mask = torch.cat(
-                    (attention_mask, correction_encodings["attention_mask"].to(device)),
-                    dim=1,
-                )
-                outputs_2 = model(
-                    combined_input_ids, attention_mask=combined_attention_mask
-                )
-                logits = outputs_2.logits
-                probs = torch.softmax(logits, dim=-1)
-                y_pred = torch.argmax(probs, dim=-1)
-                y_pred_decoded = tokenizer.batch_decode(
-                    y_pred, skip_special_tokens=True
-                )
-
-                reward, correct = estimate_reward(
-                    y_pred_decoded, solutions, return_correctness=True
-                )
-                correct_answers.append(correct)
-                total_reward += torch.sum(reward).item()
-                total_samples += len(solutions)
-
-    correct_answers = torch.stack(correct_answers).float()
-    accuracy = torch.mean(correct_answers)
-
-    return total_reward, accuracy.item()
+def evaluate_model(model, tokenizer, dataloader):
+    # TODO
+    pass
 
 
 def main():
-    wandb.init(project="SCoRe-v1")
+    wandb.init(project="SCoRe-Math")
     model, tokenizer = load_model_and_tokenizer(MODEL_NAME, quantize=True, lora=True)
     dataloader, test_dataloader = load_and_prepare_data(DATASET_NAME, tokenizer)
 
     # Load the base model for comparison
     base_model = load_model_and_tokenizer(
-        MODEL_NAME, return_tokenizer=False, quantize=True, lora=False
+        MODEL_NAME, return_tokenizer=False, quantize=False, lora=False
     ).eval()
     optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
 
@@ -547,29 +474,22 @@ def main():
         base_model=base_model,
         tokenizer=tokenizer,
         dataloader=dataloader,
-        num_epochs=3,
+        num_epochs=stage_1_epochs,
         optimizer=optimizer,
         beta2=BETA2,
     )
 
-    # model, stage_2_loss = train_stage_2(
-    #     model,
-    #     base_model,
-    #     tokenizer,
-    #     dataloader,
-    #     1,
-    #     optimizer,
-    #     BETA1,
-    #     ALPHA,
-    #     device=device,
-    # )
+    model = train_stage_2(
+        model,
+        base_model,
+        tokenizer,
+        dataloader,
+        num_epochs=stage_2_epochs,
+        optimizer=optimizer,
+        beta1=BETA1,
+        alpha=ALPHA,
+    )
 
-    # Combine all metrics into a single log
-
-    # total_reward, accuracy = evaluate_model(
-    #     model, tokenizer, test_dataloader, device=device
-    # )
-    # wandb.log({"total_reward": total_reward, "accuracy": accuracy})
     # Save the trained model
     # trained_model.save_pretrained("score_stage_i_model")
     # tokenizer.save_pretrained("score_stage_i_model")
