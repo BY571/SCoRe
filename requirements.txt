@@ -5,6 +5,4 @@ accelerate
 scikit-learn
 sentence-transformers
 nltk
-peft
-bitsandbytes
 wandb
