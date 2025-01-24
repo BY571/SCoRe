@@ -36,8 +36,8 @@ MAX_PROMPT_LEN1 = 1000
 mnt_attempt1 = 1000
 mnt_attempt2 = 1000
 MAX_PROMPT_LEN2 = 2000
-stage_1_epochs = 10
-stage_2_epochs = 10
+stage_1_epochs = 20
+stage_2_epochs = 60
 BETA1 = 0.01
 BETA2 = 0.1
 ALPHA = 10  # 𝛼 is a positive constant multiplier, ideally larger than 1.0
@@ -161,7 +161,7 @@ def load_and_prepare_data(dataset_name: str, tokenizer):
     tokenized_dataset = dataset.map(tokenize_function, batched=True)
     tokenized_test_dataset = test_dataset.map(tokenize_function, batched=True)
 
-    return tokenized_dataset.select(range(8)), tokenized_test_dataset
+    return tokenized_dataset, tokenized_test_dataset
 
 
 def reward_bonus(y2s: list, y1s: list, y_stars: list) -> float:
@@ -583,9 +583,9 @@ def main():
         tokenizer,
         chat_template="llama-3.1",
     )
-    train_dataset, test_dataloader = load_and_prepare_data(DATASET_NAME, tokenizer)
-    train_dataloader = train_dataset.iter(batch_size=BATCH_SIZE)
-    test_dataloader = test_dataloader.iter(batch_size=1)
+    train_dataset, test_dataset = load_and_prepare_data(DATASET_NAME, tokenizer)
+    # currently testing on subset of the dataset
+    train_dataset = train_dataset.select(range(8))
 
     optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
 
