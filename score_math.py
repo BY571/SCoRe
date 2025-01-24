@@ -591,14 +591,14 @@ def main():
 
     # total_reward, accuracy = evaluate_model(model, tokenizer, test_dataloader, device=device)
 
-    # model = train_stage_1(
-    #     model=model,
-    #     tokenizer=tokenizer,
-    #     train_dataset=train_dataset,
-    #     num_epochs=stage_1_epochs,
-    #     optimizer=optimizer,
-    #     beta2=BETA2,
-    # )
+    model = train_stage_1(
+        model=model,
+        tokenizer=tokenizer,
+        train_dataset=train_dataset,
+        num_epochs=stage_1_epochs,
+        optimizer=optimizer,
+        beta2=BETA2,
+    )
 
     model = train_stage_2(
         model,

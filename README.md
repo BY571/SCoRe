@@ -32,4 +32,5 @@ python score_math.py
 #### TODOs:
 - add eval [ ] 
 - create SCoRe Trainer class [ ]
+- cleanup code [ ]
 - run experiments for math [ ]
