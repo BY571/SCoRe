@@ -66,6 +66,8 @@ class ModelConfig:
     load_in_4bit: bool
     chat_template: str
     lora: LoRAConfig
+    fast_inference: bool = False           # use vLLM for generation (Unsloth `fast_inference=True`)
+    fast_inference_gpu_mem: float = 0.5    # vLLM GPU memory share when fast_inference is on
 
 
 @dataclass
@@ -176,6 +178,9 @@ def load_model_and_tokenizer(cfg: ModelConfig) -> tuple[Any, Any]:
         max_seq_length=cfg.max_seq_length,
         dtype=None,
         load_in_4bit=cfg.load_in_4bit,
+        fast_inference=cfg.fast_inference,
+        gpu_memory_utilization=cfg.fast_inference_gpu_mem if cfg.fast_inference else None,
+        max_lora_rank=cfg.lora.r if cfg.fast_inference else None,
     )
     model = FastLanguageModel.get_peft_model(
         model,

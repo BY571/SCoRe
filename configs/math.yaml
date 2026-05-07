@@ -3,9 +3,11 @@ wandb_project: SCoRe-Math
 
 model:
   name: unsloth/Qwen3-4B-unsloth-bnb-4bit
-  max_seq_length: 12288           # attempt2 prompt (up to ~6k) + new tokens (3k) + headroom
+  max_seq_length: 12288           # attempt2 prompt (up to ~6k) + new tokens (4k) + headroom
   load_in_4bit: true              # noop for the pre-quantized weights, kept for clarity
   chat_template: ""               # empty = use the tokenizer's built-in template (Qwen3 ships one)
+  fast_inference: true            # use vLLM for generation — 2-3x faster than HF generate()
+  fast_inference_gpu_mem: 0.5     # vLLM GPU memory share (training keeps the rest)
   lora:
     r: 16
     alpha: 16
