@@ -18,7 +18,7 @@ function below, decorate, then reference the names from your YAML.
 from __future__ import annotations
 
 import re
-from typing import Callable
+from collections.abc import Callable
 
 RewardFn = Callable[[list[str], list[str]], list[float]]
 AnswerExtractor = Callable[[str], str]
@@ -54,13 +54,9 @@ def register_extractor(name: str) -> Callable[[AnswerExtractor], AnswerExtractor
 def exact_match(predictions: list[str], targets: list[str]) -> list[float]:
     """1.0 if normalized strings match else 0.0. Whitespace-stripped, lowercased."""
     return [
-        1.0 if _normalize(p) == _normalize(t) else 0.0
+        1.0 if p.strip().lower() == t.strip().lower() else 0.0
         for p, t in zip(predictions, targets)
     ]
-
-
-def _normalize(s: str) -> str:
-    return s.strip().lower()
 
 
 # --- Answer extractors --------------------------------------------------------
@@ -71,28 +67,52 @@ def identity(text: str) -> str:
     return text
 
 
-# Patterns are tried in order; first match wins. Falls back to any \boxed{...}
-# anywhere in the text, then to the empty string.
-_FINAL_ANSWER_PATTERNS = (
-    r"final answer is:?\s*\$([^$]+)\$",
-    r"final answer is:?\s*(?:\$\$)?\\boxed\{([^}]+)\}",
-    r"final answer is:?\s*([^\n.]+)",
-)
+def _extract_boxed(text: str) -> str | None:
+    """Return contents of the first ``\\boxed{...}`` in ``text``, or None.
+
+    Walks braces with a depth counter so nested LaTeX like ``\\boxed{\\frac{1}{2}}``
+    captures ``\\frac{1}{2}`` instead of stopping at the first ``}``.
+    """
+    idx = text.find(r"\boxed{")
+    if idx == -1:
+        return None
+    start = idx + len(r"\boxed{")
+    depth = 1
+    for i in range(start, len(text)):
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start:i]
+    return None
 
 
 @register_extractor("math_final_answer")
 def math_final_answer(text: str) -> str:
     """Extract the final answer from math-style solutions.
 
-    Handles common forms: 'final answer is: 42', 'final answer is: $y = 2x$',
-    'final answer is: \\boxed{42}', or a bare \\boxed{X} anywhere in the text.
+    Tries (in order, after locating the case-insensitive ``final answer is:`` marker):
+      1. ``\\boxed{...}`` (with optional ``$$`` / ``$`` wrapper) — balanced braces.
+      2. ``$expression$``.
+      3. Plain text up to a sentence-ending period (``.\\s`` or end of string) or a
+         newline. Keeps decimals like ``3.14`` intact.
+    Falls back to any ``\\boxed{...}`` anywhere in the text.
     """
-    lower = text.lower()
-    for pattern in _FINAL_ANSWER_PATTERNS:
-        match = re.search(pattern, lower, flags=re.DOTALL)
-        if match:
-            return match.group(1).strip().rstrip(".")
-    boxed = re.search(r"\\boxed\{([^}]+)\}", text)
-    if boxed:
-        return boxed.group(1).strip()
+    marker = re.search(r"final answer is:?\s*", text, flags=re.IGNORECASE)
+    if marker:
+        rest = text[marker.end():]
+        if rest.lstrip("$").startswith(r"\boxed{"):
+            content = _extract_boxed(rest)
+            if content is not None:
+                return content.strip().rstrip(".")
+        m = re.match(r"\$([^$\n]+)\$", rest)
+        if m:
+            return m.group(1).strip().rstrip(".")
+        m = re.match(r"([^\n]+?)(?=\.\s|\.$|\n|$)", rest)
+        if m:
+            return m.group(1).strip().rstrip(".")
+    content = _extract_boxed(text)
+    if content is not None:
+        return content.strip().rstrip(".")
     return ""

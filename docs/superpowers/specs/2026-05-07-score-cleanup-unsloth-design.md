@@ -161,8 +161,39 @@ Top-down, ~250 lines total. Single file. Functions in this order:
 
 These are small deltas relative to the existing scripts; documented so they don't surprise reviewers.
 
-- ~~**Stage II log-probs over generated tokens only**~~ — already fixed on main (PR #1, merged 2026-05-07). The new `score_math.py` uses a shared `get_log_probs(model, ids, prompt_len)` helper that slices the prompt off and shifts logits by one. We will keep the same approach.
-- **Math reward = binary final-answer match, not similarity-based** — main still uses `LLMAnswerComparator` (BERT cosine similarity, threshold=0.9). The paper uses 0/1 correctness (final answer string matches). With our extractor in place, normalized string equality on the extracted final answer is the right reward and removes the silent failure mode where "41" vs "42" can score 0.95. Drop `LLMAnswerComparator`. `bert_similarity` is **not** ported.
+### 6.1 Already fixed on main
+
+- ~~**Stage II log-probs over generated tokens only**~~ — already fixed on main (PR #1, merged 2026-05-07). The shared `get_log_probs(model, ids, prompt_len)` helper slices the prompt off and shifts logits by one. We keep the same approach (now vectorized — see §6.3).
+
+### 6.2 Algorithm fixes vs the paper
+
+Verified against ICLR 2025 PDF (`arXiv:2409.12917`). Equation references are to the paper.
+
+- **Math reward = binary final-answer match, not similarity-based.** Main used `LLMAnswerComparator` (BERT cosine, threshold=0.9). Paper uses 0/1 correctness; "41" vs "42" should score 0. Replaced with `exact_match` after the configurable answer extractor.
+- **Stage I PG drops the first-attempt log-probs.** Main's loss had `(log π(y1) + log π(y2)) · r(y2)`. Paper's Stage I objective (Eq. 3) only rewards `r(y2)`; with the "instantaneous reward, γ=0" convention (Appendix A.4 line 1130), `log π(y1)` gets weighted by 0 and falls out. Stage I leaves the first-attempt distribution shaped only by the KL anchor.
+- **KL is forward `D_KL(π_θ || π_ref)` and summed over vocab.** The original `get_kl_div` had three independent issues:
+  1. `F.kl_div(input=log_π, target=log_base, log_target=True)` computes `KL(base || π)` (reverse KL). Paper Eq. 3/4 use forward KL.
+  2. `kl.mean(-1)` divides by `vocab_size` (~128k for Llama-3); KL must be **summed** over the support, so β values were effectively scaled by `1/vocab_size`.
+  3. Callers passed `log_π.detach()` to `get_kl_div`, so β·KL contributed **no gradient** at all — Stage I had no first-attempt anchor in practice.
+
+  Fix: compute KL manually as `Σ exp(log_π)·(log_π − log_base)`, summed over vocab, with `log_base` from `model.disable_adapter()` under `torch.no_grad()` (no grad needed there) and **no `.detach()`** on `log_π` (gradient must flow).
+
+- **`math_final_answer` regex.** The original third pattern `[^\n.]+` excluded `.`, silently truncating decimals (`"3.14"` → `"3"`). The boxed pattern `[^}]+` stopped at the first `}`, breaking nested LaTeX (`\boxed{\frac{1}{2}}` → `\frac{1`). Replaced with: case-insensitive marker search, `$...$`, balanced-brace `\boxed{...}` scan, and a non-greedy plain-text capture that allows decimals (`(.+?)(?=\.\s|\.$|\n|$)`).
+
+### 6.3 Other fixes from PR review
+
+- **`optimizer.zero_grad / backward / step` moved outside the `autocast` block** (the standard pattern; works for bf16 today, won't surprise anyone who ever switches to fp16 with a grad scaler).
+- **W&B logging is per-step**, not a smeared running mean of batch means accumulated across the epoch.
+- **`evaluate` slices the test set upfront** with `test_dataset.select(range(min(...)))` instead of using a per-batch `seen` counter that overshoots.
+- **`get_log_probs` is vectorized**: dropped the Python batch loop (which served no memory purpose since rows were `torch.stack`-ed at the end anyway), and dropped the `return_probs` flag (every Stage I/II caller wanted both returns).
+- **`RewardConfig.__post_init__`** validates `fn` and `answer_extractor` against the registry, so config typos fail at config-load instead of after model+dataset load.
+- **`TrainConfig.__post_init__`** asserts `max_prompt_length_attempt2 ≥ max_prompt_length_attempt1`.
+- **`load_and_prepare_data`** raises if `test_split_size > len(test_dataset)`.
+- **`Rollout`** drops the redundant `attempt{1,2}_answer_tokens` fields; they're now `@property` views over `action{1,2}_tokens` so they can't desynchronize.
+- **Seed coverage**: `random`, `numpy`, `torch.manual_seed`, `torch.cuda.manual_seed_all` all set.
+- **YAGNI drops**: `EvalConfig.enabled` (set `max_examples: 0` to skip eval) and `OutputConfig.save_after_stage1`/`save_after_stage2` (always save — they're a few hundred MB and the only artifacts the script produces).
+- **`identity` extractor** kept (3 LOC) so users have a documented "no extraction" option in the registry.
+- **`_normalize` in `reward_function.py`** inlined into `exact_match` (one `strip().lower()` per side).
 
 ## 7. README contents (rewritten)
 

@@ -58,9 +58,4 @@ The dataset must have:
 
 ## How the math example dataset was built
 
-`Sebasdi/math_final_answer` is `lighteval/MATH` with each solution suffixed by an extracted final-answer marker (so the extractor has something to parse). The script that produced it has been removed; see git history before this PR if you need it.
-
-## TODOs
-
-- Validate end-to-end on a multi-GPU run with the full MATH dataset.
-- Decide whether to expose CLI overrides (`--train.learning_rate=1e-5`).
+`Sebasdi/math_final_answer` is `lighteval/MATH` with each solution suffixed by an extracted final-answer marker (so the extractor has something to parse). The script that produced it (`dataset_relabel.py`) used GPT-3.5 to extract the final answer from each MATH solution; it is preserved in git history if regeneration is ever needed.

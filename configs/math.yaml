@@ -62,12 +62,9 @@ train:
   seed: 3407
 
 eval:
-  enabled: true
   batch_size: 1
-  max_examples: 200
+  max_examples: 200             # set to 0 to skip eval
   generation_temperature: 0.0   # greedy
 
 output:
-  dir: outputs
-  save_after_stage1: true
-  save_after_stage2: true
+  dir: outputs                  # adapters saved to {dir}/{run_name}/stage{1,2}/
