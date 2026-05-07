@@ -26,6 +26,15 @@ python train.py --config configs/math.yaml
 
 Logs go to W&B (project from `wandb_project` in the config). LoRA adapters are saved to `outputs/{run_name}/stage{1,2}/`.
 
+## Thinking-mode models
+
+Qwen3-style models that emit `<think>...</think>` reasoning blocks before the final answer are supported out of the box: `train.py` strips think blocks from the first attempt before passing it to the second attempt as conversation history (per the Qwen3 model card), while still crediting the thinking tokens in the policy gradient. The reward extractor finds the final answer regardless of where it lives in the output.
+
+Two YAML knobs to know about for thinking models:
+
+- `model.chat_template: ""` — empty string skips Unsloth's `get_chat_template` override and uses the tokenizer's built-in template (Qwen3 ships its own).
+- `eval.generation_temperature` must be `> 0` — greedy decoding on Qwen3 in thinking mode causes infinite loops per the model's documentation.
+
 ## Adapt to a new task
 
 Everything task-specific lives in the YAML and the reward registry. To add a new task:

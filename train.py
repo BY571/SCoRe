@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import random
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -186,8 +187,31 @@ def load_model_and_tokenizer(cfg: ModelConfig) -> tuple[Any, Any]:
         use_gradient_checkpointing="unsloth",
         random_state=3407,
     )
-    tokenizer = get_chat_template(tokenizer, chat_template=cfg.chat_template)
+    if cfg.chat_template:
+        tokenizer = get_chat_template(tokenizer, chat_template=cfg.chat_template)
     return model, tokenizer
+
+
+# --- Thinking-mode handling --------------------------------------------------
+
+_THINK_BLOCK = re.compile(r"<think>.*?</think>\s*", flags=re.DOTALL)
+
+
+def strip_thinking(text: str) -> str:
+    """Remove ``<think>...</think>`` blocks for use in conversation history.
+
+    Models like Qwen3 emit a ``<think>...</think>`` reasoning block before the
+    final answer. Per the Qwen3 model card, thinking content should be excluded
+    from multi-turn history. SCoRe's second attempt receives the first attempt's
+    output as an assistant turn, so we strip the thinking block there.
+
+    Reward extraction still operates on the full output (the final-answer
+    extractor finds the answer wherever it lives), and the policy gradient still
+    credits all generated tokens including the thinking ones.
+
+    No-op for outputs that don't contain ``<think>`` tags.
+    """
+    return _THINK_BLOCK.sub("", text).strip()
 
 
 def load_and_prepare_data(
@@ -356,7 +380,7 @@ def two_attempt_rollout(
 
     messages = [list(m) for m in batch["messages"]]
     for m, a in zip(messages, answer1_text):
-        m.append({"role": "assistant", "content": a})
+        m.append({"role": "assistant", "content": strip_thinking(a)})
         m.append({"role": "user", "content": cfg.prompts.self_correction})
     init_x2 = [
         tokenizer.apply_chat_template(m, add_generation_prompt=True, tokenize=False)
