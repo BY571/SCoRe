@@ -28,12 +28,14 @@ Logs go to W&B (project from `wandb_project` in the config). LoRA adapters are s
 
 ## Thinking-mode models
 
-Qwen3-style models that emit `<think>...</think>` reasoning blocks before the final answer are supported out of the box: `train.py` strips think blocks from the first attempt before passing it to the second attempt as conversation history (per the Qwen3 model card), while still crediting the thinking tokens in the policy gradient. The reward extractor finds the final answer regardless of where it lives in the output.
+Qwen3-style models that emit `<think>...</think>` reasoning blocks before the final answer are supported. `train.py` passes the **full** first-attempt output (reasoning + answer) into the second attempt as conversation history — SCoRe self-correction means reviewing prior reasoning, so the corrector needs to see *where* the error was made, not just the conclusion. Note that this differs from the Qwen3 model card's general-chat guidance to strip thinking from history; SCoRe is a different regime.
 
 Two YAML knobs to know about for thinking models:
 
 - `model.chat_template: ""` — empty string skips Unsloth's `get_chat_template` override and uses the tokenizer's built-in template (Qwen3 ships its own).
 - `eval.generation_temperature` must be `> 0` — greedy decoding on Qwen3 in thinking mode causes infinite loops per the model's documentation.
+
+Token-budget knobs scale up because attempt 2's prompt now contains attempt 1's full reasoning chain: `model.max_seq_length`, `train.max_new_tokens_attempt{1,2}`, and `train.max_prompt_length_attempt2` are sized for that.
 
 ## Adapt to a new task
 

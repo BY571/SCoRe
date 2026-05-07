@@ -3,7 +3,7 @@ wandb_project: SCoRe-Math
 
 model:
   name: unsloth/Qwen3-4B-unsloth-bnb-4bit
-  max_seq_length: 8192            # attempt2 prompt (~5k) + new tokens (3k) need headroom
+  max_seq_length: 12288           # attempt2 prompt (up to ~6k) + new tokens (3k) + headroom
   load_in_4bit: true              # noop for the pre-quantized weights, kept for clarity
   chat_template: ""               # empty = use the tokenizer's built-in template (Qwen3 ships one)
   lora:
@@ -57,7 +57,7 @@ train:
   max_new_tokens_attempt1: 3000   # Qwen3 thinking emits <think>...</think> before the answer
   max_new_tokens_attempt2: 3000
   max_prompt_length_attempt1: 2000
-  max_prompt_length_attempt2: 5000   # attempt2 prompt = attempt1 prompt + attempt1 output (no think) + self-correction
+  max_prompt_length_attempt2: 6000   # attempt2 prompt = attempt1 prompt + full attempt1 output (incl. reasoning) + self-correction
   generation_temperature: 1.0
   seed: 3407
 
