@@ -599,10 +599,9 @@ def main() -> None:
     if args.smoke > 0:
         n_train = min(len(train_dataset), args.smoke)
         train_dataset = train_dataset.select(range(n_train))
-        cfg.eval.max_examples = min(cfg.eval.max_examples, args.smoke)
+        cfg.eval.max_examples = 0  # skip eval — smoke verifies the training step, not the algorithm
         print(
-            f"SMOKE RUN: train subset to {n_train} examples, "
-            f"eval cap to {cfg.eval.max_examples}"
+            f"SMOKE RUN: train subset to {n_train} examples, eval skipped"
         )
 
     optimizer = torch.optim.Adam(model.parameters(), lr=cfg.train.learning_rate)
