@@ -1,0 +1,73 @@
+run_name: score-math
+wandb_project: SCoRe-Math
+
+model:
+  name: unsloth/Llama-3.2-3B-Instruct
+  max_seq_length: 3000
+  load_in_4bit: true
+  chat_template: llama-3.1
+  lora:
+    r: 16
+    alpha: 16
+    dropout: 0.0
+    target_modules:
+      - q_proj
+      - k_proj
+      - v_proj
+      - o_proj
+      - gate_proj
+      - up_proj
+      - down_proj
+
+dataset:
+  name: Sebasdi/math_final_answer
+  input_field: problem
+  target_field: final_answer_solution
+  test_split_size: 200
+
+prompts:
+  system: |
+    You are a math expert. Solve problems step by step, showing all work.
+
+    Final Answer Format:
+    - For numbers: "The final answer is: 42"
+    - For equations: "The final answer is: $y = 2x - 13$"
+
+    Always clearly show your reasoning and conclusion.
+
+  self_correction: |
+    There might be an error in the solution above because of lack of
+    understanding of the question. Please correct the error, if any, and
+    rewrite the solution. At the end of the Solution, when you give your
+    final answer indicate your final answer by writing "the final answer
+    is: <your answer>".
+
+reward:
+  fn: exact_match
+  answer_extractor: math_final_answer
+
+train:
+  batch_size: 2
+  learning_rate: 5.0e-6
+  stage1_epochs: 1
+  stage2_epochs: 1
+  beta1: 0.01
+  beta2: 0.1
+  alpha: 10.0
+  max_new_tokens_attempt1: 1000
+  max_new_tokens_attempt2: 1000
+  max_prompt_length_attempt1: 1000
+  max_prompt_length_attempt2: 2000
+  generation_temperature: 1.0
+  seed: 3407
+
+eval:
+  enabled: true
+  batch_size: 1
+  max_examples: 200
+  generation_temperature: 0.0   # greedy
+
+output:
+  dir: outputs
+  save_after_stage1: true
+  save_after_stage2: true
