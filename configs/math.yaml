@@ -56,7 +56,7 @@ reward:
   answer_extractor: math_final_answer
 
 train:
-  batch_size: 2
+  batch_size: 8                  # bumped 2→8 — Spark has 128 GB unified memory, plenty of headroom
   learning_rate: 5.0e-6
   stage1_epochs: 1
   stage2_epochs: 1
