@@ -61,8 +61,8 @@ train:
   beta1: 0.01
   beta2: 0.1
   alpha: 10.0
-  max_new_tokens_attempt1: 5000   # Qwen3 thinking can be long; profile run hit 3000 cap on 4/10 questions
-  max_new_tokens_attempt2: 5000
+  max_new_tokens_attempt1: 4096   # Qwen3 thinking can be long; profile run hit 3000 cap on 4/10 questions
+  max_new_tokens_attempt2: 4096
   max_prompt_length_attempt1: 2000
   max_prompt_length_attempt2: 6000   # attempt2 prompt = attempt1 prompt + full attempt1 output (incl. reasoning) + self-correction
   generation_temperature: 1.0
