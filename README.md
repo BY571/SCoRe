@@ -1,6 +1,13 @@
 # SCoRe: Self-Correct via Reinforcement Learning
 
-Minimal, task-agnostic implementation of [Training Language Models to Self-Correct via Reinforcement Learning](https://arxiv.org/abs/2409.12917) (Kumar et al., 2024) using [Unsloth](https://github.com/unslothai/unsloth) for efficient 4-bit LoRA training.
+Task-agnostic, **SCoRe-inspired** implementation. Built on the algorithm in [Training Language Models to Self-Correct via Reinforcement Learning](https://arxiv.org/abs/2409.12917) (Kumar et al., ICLR 2025), with practical modifications so it runs cleanly on small open-weight reasoning models like Qwen3-4B with [Unsloth](https://github.com/unslothai/unsloth) 4-bit LoRA.
+
+The core algorithm — Stage I with a KL anchor on the first attempt, Stage II with a reward shaping bonus `α · (r(y2) − r(y1))` — is faithful to the paper. The deviations are:
+
+- **Reasoning-model integration.** Modern reasoning models emit `<think>...</think>` blocks before their answer. The shipped prompts ask the model to reason inside `<think>` and put its final answer in `<answer>...</answer>`. SCoRe self-correction needs the corrector to see the prior reasoning, so attempt 1's `<think>...</think>` is converted to plain-text `[Prior reasoning: ...]` before being added as conversation history (Qwen3's bundled chat template silently strips raw `<think>` tags from prior assistant turns — the conversion preserves the content).
+- **Compound reward.** Default reward is `format_and_match`: 0.25 for a balanced `<think>...</think>` pair, 0.25 for exactly one `<answer>...</answer>` pair, 0.5 for the extracted answer matching the target. This gives Stage II's α-bonus more signal than a pure binary reward and explicitly rewards format compliance — the alternative is silent reward=0 whenever the model produces a correct answer in a slightly off format.
+- **Robust answer extraction.** `math_final_answer` tries `<answer>...</answer>` first (modern), then any `\boxed{...}` (the unambiguous answer in MATH-style datasets), then a `final answer is:` marker as a last resort. Wrappers like `$...$`, `\[...\]`, and `\boxed{...}` are peeled iteratively. This handles the doubly-wrapped form some published MATH-derived datasets ship.
+- **Unsloth + LoRA only.** The paper's experiments use full fine-tuning of much larger models (Gemini Flash, Gemma 27B). This implementation targets 4B-class models on a single GPU; the policy gradient flows through the LoRA adapter and the reference policy is the same model with the adapter disabled (no second model in VRAM).
 
 ## Layout
 
@@ -26,16 +33,14 @@ python train.py --config configs/math.yaml
 
 Logs go to W&B (project from `wandb_project` in the config). LoRA adapters are saved to `outputs/{run_name}/stage{1,2}/`.
 
-## Thinking-mode models
+## Thinking-mode caveats
 
-Qwen3-style models that emit `<think>...</think>` reasoning blocks before the final answer are supported. `train.py` passes the **full** first-attempt output (reasoning + answer) into the second attempt as conversation history — SCoRe self-correction means reviewing prior reasoning, so the corrector needs to see *where* the error was made, not just the conclusion. Note that this differs from the Qwen3 model card's general-chat guidance to strip thinking from history; SCoRe is a different regime.
-
-Two YAML knobs to know about for thinking models:
+Two YAML knobs matter for reasoning models:
 
 - `model.chat_template: ""` — empty string skips Unsloth's `get_chat_template` override and uses the tokenizer's built-in template (Qwen3 ships its own).
 - `eval.generation_temperature` must be `> 0` — greedy decoding on Qwen3 in thinking mode causes infinite loops per the model's documentation.
 
-Token-budget knobs scale up because attempt 2's prompt now contains attempt 1's full reasoning chain: `model.max_seq_length`, `train.max_new_tokens_attempt{1,2}`, and `train.max_prompt_length_attempt2` are sized for that.
+Token budgets are scaled up because attempt 2's prompt now contains attempt 1's full reasoning (converted to plain text). `model.max_seq_length`, `train.max_new_tokens_attempt{1,2}`, and `train.max_prompt_length_attempt2` are sized for that.
 
 ## Adapt to a new task
 

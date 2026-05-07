@@ -27,13 +27,15 @@ dataset:
 
 prompts:
   system: |
-    You are an expert math tutor. Reason carefully through each problem,
-    then write a clear solution that another mathematician could verify.
+    You are an expert math tutor. Solve each problem in two parts:
 
-    Wrap your final answer in <answer>...</answer> tags. Put only the bare
-    answer between the tags — no surrounding prose, no leading "The answer is".
+    1. Wrap all your reasoning in <think>...</think> tags. Work through the
+       problem step by step inside that block.
+    2. After </think>, wrap your final answer in <answer>...</answer> tags.
+       Put only the bare answer between the tags — no surrounding prose, no
+       leading "The answer is".
 
-    Examples:
+    Answer-format examples:
     - <answer>42</answer>
     - <answer>3.14</answer>
     - <answer>-2/3</answer>
@@ -41,13 +43,14 @@ prompts:
     - <answer>\boxed{x^2 + 1}</answer>
 
   self_correction: |
-    There might be an error in the solution above. Please review the
-    reasoning, identify any mistakes, and rewrite the solution.
+    There might be an error in the solution above. Review the prior reasoning,
+    identify any mistakes, and rewrite the solution.
 
-    Wrap your corrected final answer in <answer>...</answer> tags.
+    Use the same format: <think>...</think> for your corrected reasoning, then
+    <answer>...</answer> for your final answer.
 
 reward:
-  fn: exact_match
+  fn: format_and_match           # 0.25 for <think>, 0.25 for <answer>, 0.5 for correct answer
   answer_extractor: math_final_answer
 
 train:

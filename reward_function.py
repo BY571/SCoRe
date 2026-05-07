@@ -5,11 +5,16 @@
     extract = ANSWER_EXTRACTORS[cfg.reward.answer_extractor]
     reward  = REWARD_FNS[cfg.reward.fn]
 
-Composition in `train.py`:
+Reward functions receive the **full** prediction and target text plus the
+configured extractor, and return per-example floats in [0, 1]:
 
-    extracted_pred   = [extract(p) for p in predictions]
-    extracted_target = [extract(t) for t in targets]
-    rewards = reward(extracted_pred, extracted_target)  # list[float] in [0, 1]
+    rewards = reward(predictions, targets, extract)
+
+This signature lets format-aware rewards (e.g. `format_and_match`) inspect
+tag structure on the prediction while still using the extractor for the
+answer-correctness check. Format-only rewards apply checks only to the
+prediction; targets typically come from a dataset and may not carry the
+same format conventions.
 
 To support a new task, add one extractor and (optionally) one reward
 function below, decorate, then reference the names from your YAML.
@@ -20,8 +25,8 @@ from __future__ import annotations
 import re
 from collections.abc import Callable
 
-RewardFn = Callable[[list[str], list[str]], list[float]]
 AnswerExtractor = Callable[[str], str]
+RewardFn = Callable[[list[str], list[str], AnswerExtractor], list[float]]
 
 REWARD_FNS: dict[str, RewardFn] = {}
 ANSWER_EXTRACTORS: dict[str, AnswerExtractor] = {}
@@ -50,13 +55,61 @@ def register_extractor(name: str) -> Callable[[AnswerExtractor], AnswerExtractor
 # --- Reward functions ---------------------------------------------------------
 
 
+def _normalize(s: str) -> str:
+    return s.strip().lower()
+
+
 @register_reward("exact_match")
-def exact_match(predictions: list[str], targets: list[str]) -> list[float]:
-    """1.0 if normalized strings match else 0.0. Whitespace-stripped, lowercased."""
+def exact_match(
+    predictions: list[str], targets: list[str], extractor: AnswerExtractor
+) -> list[float]:
+    """1.0 if extracted, normalized strings match else 0.0."""
     return [
-        1.0 if p.strip().lower() == t.strip().lower() else 0.0
+        1.0 if _normalize(extractor(p)) == _normalize(extractor(t)) else 0.0
         for p, t in zip(predictions, targets)
     ]
+
+
+_THINK_PAIR = re.compile(r"<think>.*?</think>", flags=re.DOTALL)
+_ANSWER_PAIR = re.compile(r"<answer>.*?</answer>", flags=re.DOTALL)
+
+
+def _has_balanced_think(text: str) -> bool:
+    """Exactly one well-formed ``<think>...</think>`` pair somewhere in the text."""
+    return len(_THINK_PAIR.findall(text)) >= 1
+
+
+def _has_one_answer_tag(text: str) -> bool:
+    """Exactly one well-formed ``<answer>...</answer>`` pair (no more, no less)."""
+    return len(_ANSWER_PAIR.findall(text)) == 1
+
+
+@register_reward("format_and_match")
+def format_and_match(
+    predictions: list[str], targets: list[str], extractor: AnswerExtractor
+) -> list[float]:
+    """Compound reward: tag format compliance + answer correctness.
+
+    Per prediction:
+      - 0.25 for a balanced ``<think>...</think>`` pair (reasoning closed).
+      - 0.25 for exactly one balanced ``<answer>...</answer>`` pair.
+      - 0.50 for the extracted answer matching the target after normalization.
+
+    Returns floats in [0.0, 1.0]. Format checks apply to predictions only;
+    targets may not follow the same format conventions (e.g. dataset
+    solutions in legacy ``"final answer is:"`` form).
+    """
+    rewards: list[float] = []
+    for pred, target in zip(predictions, targets):
+        r = 0.0
+        if _has_balanced_think(pred):
+            r += 0.25
+        if _has_one_answer_tag(pred):
+            r += 0.25
+        if _normalize(extractor(pred)) == _normalize(extractor(target)):
+            r += 0.5
+        rewards.append(r)
+    return rewards
 
 
 # --- Answer extractors --------------------------------------------------------
@@ -89,15 +142,27 @@ def _extract_boxed(text: str) -> str | None:
 
 
 _DOLLAR_WRAPPER = re.compile(r"^\$+|\$+$")
+_DISPLAY_BRACKETS = re.compile(r"^\\\[(.*)\\\]$", flags=re.DOTALL)
 
 
 def _peel_math_wrappers(text: str) -> str:
-    """Strip outer ``$...$`` and ``\\boxed{...}`` wrappers from a bare answer."""
-    text = _DOLLAR_WRAPPER.sub("", text).strip()
-    if text.startswith(r"\boxed{"):
-        boxed = _extract_boxed(text)
-        if boxed is not None:
-            text = boxed.strip()
+    """Strip outer ``$...$``, ``\\[...\\]`` display brackets, and ``\\boxed{...}`` wrappers.
+
+    Repeatedly peels until no wrapper remains, so combinations like
+    ``$\\[\\boxed{42}\\]$`` reduce to ``42``.
+    """
+    prev = None
+    while text != prev:
+        prev = text
+        text = _DOLLAR_WRAPPER.sub("", text).strip()
+        m = _DISPLAY_BRACKETS.match(text)
+        if m:
+            text = m.group(1).strip()
+            continue
+        if text.startswith(r"\boxed{"):
+            boxed = _extract_boxed(text)
+            if boxed is not None:
+                text = boxed.strip()
     return text
 
 
@@ -107,38 +172,38 @@ def math_final_answer(text: str) -> str:
 
     Order of attempts:
       1. ``<answer>...</answer>`` tags (the modern reasoning-model format the
-         shipped prompts request). The tag content has ``$...$`` and
-         ``\\boxed{...}`` wrappers peeled, so ``<answer>$\\boxed{42}$</answer>``,
-         ``<answer>$42$</answer>``, and ``<answer>42</answer>`` all yield ``42``.
-         When multiple ``<answer>`` tags appear, the last one wins.
-      2. After a ``final answer is:`` marker (legacy dataset format):
-         ``\\boxed{...}`` (balanced braces, optional ``$``/``$$`` wrap),
-         ``$...$``, then plain text up to a sentence-ending period or newline
-         (decimals preserved).
-      3. Any ``\\boxed{...}`` anywhere in the text.
+         shipped prompts request). The tag content has wrappers peeled, so
+         ``<answer>$\\boxed{42}$</answer>``, ``<answer>$42$</answer>``, and
+         ``<answer>42</answer>`` all yield ``42``. When multiple ``<answer>``
+         tags appear, the last one wins.
+      2. Any ``\\boxed{...}`` anywhere in the text. Preferred over the
+         "final answer is:" marker because the dataset's relabel script
+         doubly-wrapped many targets ("the final answer is $the final answer
+         is $\\boxed{X}$.$"), and ``\\boxed{X}`` is the unambiguous source of
+         truth in math problems.
+      3. After a ``final answer is:`` marker (last-resort fallback for
+         solutions without a ``\\boxed{...}``): ``$...$`` then plain text up
+         to a sentence-ending period or newline (decimals preserved).
     """
     tag_matches = re.findall(
         r"<answer>\s*(.*?)\s*</answer>",
         text,
-        flags=re.DOTALL | re.IGNORECASE,
+        flags=re.DOTALL,
     )
     if tag_matches:
         return _peel_math_wrappers(tag_matches[-1].rstrip("."))
 
+    boxed = _extract_boxed(text)
+    if boxed is not None:
+        return _peel_math_wrappers(boxed.rstrip("."))
+
     marker = re.search(r"final answer is:?\s*", text, flags=re.IGNORECASE)
     if marker:
         rest = text[marker.end():]
-        if rest.lstrip("$").startswith(r"\boxed{"):
-            content = _extract_boxed(rest)
-            if content is not None:
-                return content.strip().rstrip(".")
         m = re.match(r"\$([^$\n]+)\$", rest)
         if m:
-            return m.group(1).strip().rstrip(".")
+            return _peel_math_wrappers(m.group(1).rstrip("."))
         m = re.match(r"([^\n]+?)(?=\.\s|\.$|\n|$)", rest)
         if m:
-            return m.group(1).strip().rstrip(".")
-    content = _extract_boxed(text)
-    if content is not None:
-        return content.strip().rstrip(".")
+            return _peel_math_wrappers(m.group(1).rstrip("."))
     return ""

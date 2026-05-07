@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import random
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -191,6 +192,22 @@ def load_model_and_tokenizer(cfg: ModelConfig) -> tuple[Any, Any]:
     return model, tokenizer
 
 
+_THINK_BLOCK = re.compile(r"<think>(.*?)</think>", flags=re.DOTALL)
+
+
+def thinking_to_history(text: str) -> str:
+    """Rewrite ``<think>...</think>`` blocks as plain-text reasoning notes.
+
+    Qwen3's bundled chat template **silently strips** ``<think>...</think>``
+    from prior assistant turns when re-rendering multi-turn history. SCoRe
+    self-correction needs the corrector to see the reasoning that produced
+    attempt 1, so we wrap the reasoning in plain-text markers (which the
+    template won't strip) before appending attempt 1 as the assistant turn
+    for attempt 2. No-op if no ``<think>`` tags are present.
+    """
+    return _THINK_BLOCK.sub(r"[Prior reasoning: \1]", text).strip()
+
+
 def load_and_prepare_data(
     dataset_cfg: DatasetConfig,
     prompts: PromptsConfig,
@@ -325,7 +342,7 @@ def two_attempt_rollout(
         temperature = train_cfg.generation_temperature
     extractor = rf.ANSWER_EXTRACTORS[cfg.reward.answer_extractor]
     reward_fn = rf.REWARD_FNS[cfg.reward.fn]
-    targets = list(batch["target"])
+    targets: list[str] = list(batch["target"])
     do_sample = temperature > 0.0
     gen_temp = temperature if do_sample else 1.0
 
@@ -350,16 +367,13 @@ def two_attempt_rollout(
     attempt1_answer_tokens = action1_tokens[:, x1_len:]
     attempt1_answer_mask = get_eos_mask(attempt1_answer_tokens, tokenizer)
     answer1_text = tokenizer.batch_decode(attempt1_answer_tokens, skip_special_tokens=True)
-    reward1 = reward_fn(
-        [extractor(a) for a in answer1_text],
-        [extractor(t) for t in targets],
-    )
+    reward1 = reward_fn(answer1_text, targets, extractor)
 
     messages = [list(m) for m in batch["messages"]]
     for m, a in zip(messages, answer1_text):
-        # Pass the full attempt-1 output (including any <think>...</think> reasoning)
-        # so the corrector can review the reasoning that produced the answer.
-        m.append({"role": "assistant", "content": a})
+        # Convert <think>...</think> to plain-text [Prior reasoning: ...] so the
+        # chat template doesn't strip it from history (Qwen3 does this by default).
+        m.append({"role": "assistant", "content": thinking_to_history(a)})
         m.append({"role": "user", "content": cfg.prompts.self_correction})
     init_x2 = [
         tokenizer.apply_chat_template(m, add_generation_prompt=True, tokenize=False)
@@ -385,10 +399,7 @@ def two_attempt_rollout(
     attempt2_answer_tokens = action2_tokens[:, x2_len:]
     attempt2_answer_mask = get_eos_mask(attempt2_answer_tokens, tokenizer)
     answer2_text = tokenizer.batch_decode(attempt2_answer_tokens, skip_special_tokens=True)
-    reward2 = reward_fn(
-        [extractor(a) for a in answer2_text],
-        [extractor(t) for t in targets],
-    )
+    reward2 = reward_fn(answer2_text, targets, extractor)
 
     return Rollout(
         action1_tokens=action1_tokens,
