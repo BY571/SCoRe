@@ -9,3 +9,6 @@ api.txt
 .venv/
 .env
 unsloth_compiled_cache/
+docs/superpowers/
+.claude/
+.superpowers/
