@@ -351,7 +351,7 @@ def two_attempt_rollout(
     do_sample = temperature > 0.0
     gen_temp = temperature if do_sample else 1.0
 
-    x1 = tokenizer.batch_encode_plus(
+    x1 = tokenizer(
         batch["text"],
         padding="max_length",
         truncation=True,
@@ -384,7 +384,7 @@ def two_attempt_rollout(
         tokenizer.apply_chat_template(m, add_generation_prompt=True, tokenize=False)
         for m in messages
     ]
-    x2 = tokenizer.batch_encode_plus(
+    x2 = tokenizer(
         init_x2,
         padding="max_length",
         truncation=True,
