@@ -576,6 +576,13 @@ def save_adapter(model: Any, tokenizer: Any, path: Path) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True, help="Path to YAML config.")
+    parser.add_argument(
+        "--smoke",
+        type=int,
+        default=0,
+        help="Smoke run: limit train to N examples and cap eval.max_examples at N. "
+             "Use to verify the loop end-to-end before a full run.",
+    )
     args = parser.parse_args()
 
     cfg = load_config(args.config)
@@ -588,6 +595,15 @@ def main() -> None:
 
     model, tokenizer = load_model_and_tokenizer(cfg.model)
     train_dataset, test_dataset = load_and_prepare_data(cfg.dataset, cfg.prompts, tokenizer)
+
+    if args.smoke > 0:
+        n_train = min(len(train_dataset), args.smoke)
+        train_dataset = train_dataset.select(range(n_train))
+        cfg.eval.max_examples = min(cfg.eval.max_examples, args.smoke)
+        print(
+            f"SMOKE RUN: train subset to {n_train} examples, "
+            f"eval cap to {cfg.eval.max_examples}"
+        )
 
     optimizer = torch.optim.Adam(model.parameters(), lr=cfg.train.learning_rate)
 
