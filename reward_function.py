@@ -88,17 +88,43 @@ def _extract_boxed(text: str) -> str | None:
     return None
 
 
+_DOLLAR_WRAPPER = re.compile(r"^\$+|\$+$")
+
+
+def _peel_math_wrappers(text: str) -> str:
+    """Strip outer ``$...$`` and ``\\boxed{...}`` wrappers from a bare answer."""
+    text = _DOLLAR_WRAPPER.sub("", text).strip()
+    if text.startswith(r"\boxed{"):
+        boxed = _extract_boxed(text)
+        if boxed is not None:
+            text = boxed.strip()
+    return text
+
+
 @register_extractor("math_final_answer")
 def math_final_answer(text: str) -> str:
-    """Extract the final answer from math-style solutions.
+    """Extract the final answer from a model output or reference solution.
 
-    Tries (in order, after locating the case-insensitive ``final answer is:`` marker):
-      1. ``\\boxed{...}`` (with optional ``$$`` / ``$`` wrapper) — balanced braces.
-      2. ``$expression$``.
-      3. Plain text up to a sentence-ending period (``.\\s`` or end of string) or a
-         newline. Keeps decimals like ``3.14`` intact.
-    Falls back to any ``\\boxed{...}`` anywhere in the text.
+    Order of attempts:
+      1. ``<answer>...</answer>`` tags (the modern reasoning-model format the
+         shipped prompts request). The tag content has ``$...$`` and
+         ``\\boxed{...}`` wrappers peeled, so ``<answer>$\\boxed{42}$</answer>``,
+         ``<answer>$42$</answer>``, and ``<answer>42</answer>`` all yield ``42``.
+         When multiple ``<answer>`` tags appear, the last one wins.
+      2. After a ``final answer is:`` marker (legacy dataset format):
+         ``\\boxed{...}`` (balanced braces, optional ``$``/``$$`` wrap),
+         ``$...$``, then plain text up to a sentence-ending period or newline
+         (decimals preserved).
+      3. Any ``\\boxed{...}`` anywhere in the text.
     """
+    tag_matches = re.findall(
+        r"<answer>\s*(.*?)\s*</answer>",
+        text,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+    if tag_matches:
+        return _peel_math_wrappers(tag_matches[-1].rstrip("."))
+
     marker = re.search(r"final answer is:?\s*", text, flags=re.IGNORECASE)
     if marker:
         rest = text[marker.end():]

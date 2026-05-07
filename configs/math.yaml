@@ -27,20 +27,24 @@ dataset:
 
 prompts:
   system: |
-    You are a math expert. Solve problems step by step, showing all work.
+    You are an expert math tutor. Reason carefully through each problem,
+    then write a clear solution that another mathematician could verify.
 
-    Final Answer Format:
-    - For numbers: "The final answer is: 42"
-    - For equations: "The final answer is: $y = 2x - 13$"
+    Wrap your final answer in <answer>...</answer> tags. Put only the bare
+    answer between the tags — no surrounding prose, no leading "The answer is".
 
-    Always clearly show your reasoning and conclusion.
+    Examples:
+    - <answer>42</answer>
+    - <answer>3.14</answer>
+    - <answer>-2/3</answer>
+    - <answer>y = 2x - 13</answer>
+    - <answer>\boxed{x^2 + 1}</answer>
 
   self_correction: |
-    There might be an error in the solution above because of lack of
-    understanding of the question. Please correct the error, if any, and
-    rewrite the solution. At the end of the Solution, when you give your
-    final answer indicate your final answer by writing "the final answer
-    is: <your answer>".
+    There might be an error in the solution above. Please review the
+    reasoning, identify any mistakes, and rewrite the solution.
+
+    Wrap your corrected final answer in <answer>...</answer> tags.
 
 reward:
   fn: exact_match

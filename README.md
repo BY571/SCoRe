@@ -63,9 +63,16 @@ The dataset must have:
 
 - A `train` and a `test` split.
 - A column named by `dataset.input_field` (string): the question / prompt.
-- A column named by `dataset.target_field` (string): the ground-truth answer in a form the chosen `answer_extractor` can parse. For example, with the `math_final_answer` extractor, the target should contain `"the final answer is: <answer>"` or a `\boxed{<answer>}` somewhere in the text.
+- A column named by `dataset.target_field` (string): the ground-truth answer in a form the chosen `answer_extractor` can parse.
 
 `train.py` only reads these two fields — anything else in the dataset is ignored.
+
+The shipped `math_final_answer` extractor accepts two formats and tries them in order:
+
+1. **`<answer>...</answer>` tags** — the modern reasoning-model format. The shipped system prompt asks the model to use this. `$...$` and `\boxed{...}` wrappers inside the tags are peeled, so `<answer>42</answer>`, `<answer>$42$</answer>`, and `<answer>$\boxed{42}$</answer>` all extract `42`.
+2. **`final answer is: <answer>` markers** — legacy / dataset format. `\boxed{...}` (with balanced braces) and `$...$` after the marker are peeled; plain text up to the next sentence-ending period is captured. The current `Sebasdi/math_final_answer` dataset uses this format for targets.
+
+The two-format support means the same extractor works for predictions in the new tagged format and ground-truth targets in the old format — no need to re-relabel the dataset.
 
 ## How the math example dataset was built
 
