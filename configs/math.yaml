@@ -58,8 +58,8 @@ reward:
 train:
   batch_size: 16                 # bumped 8→16 after smoke showed 9.7 GB used at batch=8 — plenty of headroom on Spark
   learning_rate: 5.0e-6
-  stage1_epochs: 1
-  stage2_epochs: 1
+  stage1_epochs: 2
+  stage2_epochs: 2
   beta1: 0.01
   beta2: 0.1
   alpha: 10.0
