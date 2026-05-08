@@ -276,15 +276,18 @@ def get_log_probs(
     Slices the prompt off and shifts logits by one so they align with the next-token
     targets. Returns ``(token_log_probs, full_log_probs)`` both shaped over the
     generated span: ``[B, gen_len]`` and ``[B, gen_len, V]``.
+
+    Crucially: slices logits to the generated span *before* ``log_softmax`` to
+    avoid materializing a ``[B, full_seq, V]`` log-prob tensor — that tripped
+    OOM on long attempt-2 prompts (~6K tokens) at batch=8.
     """
     logits = model(input_ids).logits[:, :-1, :]
     targets = input_ids[:, 1:]
-    full_log_probs = logits.log_softmax(dim=-1)
-    token_log_probs = full_log_probs.gather(2, targets.unsqueeze(-1)).squeeze(-1)
-    return (
-        token_log_probs[:, prompt_len - 1:],
-        full_log_probs[:, prompt_len - 1:],
-    )
+    gen_logits = logits[:, prompt_len - 1:, :]
+    gen_targets = targets[:, prompt_len - 1:]
+    full_log_probs = gen_logits.log_softmax(dim=-1)
+    token_log_probs = full_log_probs.gather(2, gen_targets.unsqueeze(-1)).squeeze(-1)
+    return token_log_probs, full_log_probs
 
 
 def get_eos_mask(answer_ids: Tensor, tokenizer: Any) -> Tensor:
