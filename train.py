@@ -189,7 +189,7 @@ def load_model_and_tokenizer(cfg: ModelConfig) -> tuple[Any, Any]:
         lora_dropout=cfg.lora.dropout,
         target_modules=cfg.lora.target_modules,
         bias="none",
-        use_gradient_checkpointing="unsloth",
+        use_gradient_checkpointing=True,  # was "unsloth" — that mode offloads gradients to RAM and wedges Spark's unified memory
         random_state=3407,
     )
     if cfg.chat_template:
