@@ -104,7 +104,8 @@ class RewardConfig:
 
 @dataclass
 class TrainConfig:
-    batch_size: int
+    stage1_batch_size: int
+    stage2_batch_size: int
     learning_rate: float
     stage1_epochs: int
     stage2_epochs: int
@@ -440,7 +441,7 @@ def train_stage_1(
     """Stage I per Eq. 3: PG on log pi(y2) * r(y2), KL anchor on first attempt."""
     train_cfg = cfg.train
     for epoch in range(train_cfg.stage1_epochs):
-        loader = train_dataset.iter(batch_size=train_cfg.batch_size)
+        loader = train_dataset.iter(batch_size=train_cfg.stage1_batch_size)
         for batch in tqdm(loader, desc=f"Stage 1 epoch {epoch + 1}/{train_cfg.stage1_epochs}"):
             roll = two_attempt_rollout(model, tokenizer, batch, cfg)
 
@@ -491,7 +492,7 @@ def train_stage_2(
     """Stage II per Eq. 4 + Eq. 5: PG on both attempts with reward shaping bonus on r(y2)."""
     train_cfg = cfg.train
     for epoch in range(train_cfg.stage2_epochs):
-        loader = train_dataset.iter(batch_size=train_cfg.batch_size)
+        loader = train_dataset.iter(batch_size=train_cfg.stage2_batch_size)
         for batch in tqdm(loader, desc=f"Stage 2 epoch {epoch + 1}/{train_cfg.stage2_epochs}"):
             roll = two_attempt_rollout(model, tokenizer, batch, cfg)
 
