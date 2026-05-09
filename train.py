@@ -446,6 +446,27 @@ def _masked_mean_logp(log_probs: Tensor, mask: Tensor) -> Tensor:
     return (log_probs * mask).sum(-1) / mask.sum(-1).clamp(min=1)
 
 
+def _length_stats(mask: Tensor, max_new: int) -> tuple[dict[str, float], np.ndarray]:
+    """Per-sample generated lengths from the EOS mask.
+
+    The mask is 1 up-to-and-including the first EOS, 0 after, so ``mask.sum(-1)``
+    is the per-sample generation length. ``len >= max_new`` means the sample
+    never produced an EOS and was truncated at the cap — track this fraction
+    to right-size ``max_new_tokens_*`` in the config.
+
+    Returns ``(scalar_stats_dict, lens_array)``; caller decides whether to log
+    the array as a histogram.
+    """
+    lens = mask.sum(-1).cpu().numpy()
+    stats = {
+        "len_mean": float(lens.mean()),
+        "len_p95": float(np.percentile(lens, 95)),
+        "len_max": float(lens.max()),
+        "truncated_frac": float(np.mean(lens >= max_new)),
+    }
+    return stats, lens
+
+
 # --- Stage I -----------------------------------------------------------------
 
 
@@ -484,6 +505,8 @@ def train_stage_1(
             loss.backward()
             optimizer.step()
 
+            a1_stats, a1_lens = _length_stats(roll.attempt1_answer_mask, train_cfg.max_new_tokens_attempt1)
+            a2_stats, a2_lens = _length_stats(roll.attempt2_answer_mask, train_cfg.max_new_tokens_attempt2)
             wandb.log({
                 "stage1/reward_attempt1": float(np.mean(roll.reward1)),
                 "stage1/reward_attempt2": float(np.mean(roll.reward2)),
@@ -492,6 +515,10 @@ def train_stage_1(
                 ),
                 "stage1/loss": float(loss.item()),
                 "stage1/kl_div": float(kl_div.mean().item()),
+                **{f"stage1/attempt1_{k}": v for k, v in a1_stats.items()},
+                **{f"stage1/attempt2_{k}": v for k, v in a2_stats.items()},
+                "stage1/attempt1_lens_hist": wandb.Histogram(a1_lens),
+                "stage1/attempt2_lens_hist": wandb.Histogram(a2_lens),
             })
 
     return model
@@ -544,6 +571,8 @@ def train_stage_2(
             loss.backward()
             optimizer.step()
 
+            a1_stats, a1_lens = _length_stats(roll.attempt1_answer_mask, train_cfg.max_new_tokens_attempt1)
+            a2_stats, a2_lens = _length_stats(roll.attempt2_answer_mask, train_cfg.max_new_tokens_attempt2)
             wandb.log({
                 "stage2/reward_attempt1": float(np.mean(roll.reward1)),
                 "stage2/reward_attempt2": float(np.mean(roll.reward2)),
@@ -553,6 +582,10 @@ def train_stage_2(
                 "stage2/loss": float(loss.item()),
                 "stage2/kl_div_attempt1": float(kl_1.mean().item()),
                 "stage2/kl_div_attempt2": float(kl_2.mean().item()),
+                **{f"stage2/attempt1_{k}": v for k, v in a1_stats.items()},
+                **{f"stage2/attempt2_{k}": v for k, v in a2_stats.items()},
+                "stage2/attempt1_lens_hist": wandb.Histogram(a1_lens),
+                "stage2/attempt2_lens_hist": wandb.Histogram(a2_lens),
             })
 
     return model
@@ -571,6 +604,8 @@ def evaluate(
     subset = test_dataset.select(range(n))
     rewards1: list[float] = []
     rewards2: list[float] = []
+    lens1: list[int] = []
+    lens2: list[int] = []
     loader = subset.iter(batch_size=cfg.eval.batch_size)
     for batch in tqdm(loader, desc="Eval", total=(n + cfg.eval.batch_size - 1) // cfg.eval.batch_size):
         roll = two_attempt_rollout(
@@ -578,9 +613,22 @@ def evaluate(
         )
         rewards1.extend(roll.reward1)
         rewards2.extend(roll.reward2)
-    metrics = {
+        lens1.extend(roll.attempt1_answer_mask.sum(-1).cpu().tolist())
+        lens2.extend(roll.attempt2_answer_mask.sum(-1).cpu().tolist())
+
+    lens1_arr = np.array(lens1)
+    lens2_arr = np.array(lens2)
+    metrics: dict[str, float] = {
         "acc_attempt1": float(np.mean(rewards1)),
         "acc_attempt2": float(np.mean(rewards2)),
+        "attempt1_len_mean": float(lens1_arr.mean()),
+        "attempt1_len_p95": float(np.percentile(lens1_arr, 95)),
+        "attempt1_len_max": float(lens1_arr.max()),
+        "attempt1_truncated_frac": float(np.mean(lens1_arr >= cfg.train.max_new_tokens_attempt1)),
+        "attempt2_len_mean": float(lens2_arr.mean()),
+        "attempt2_len_p95": float(np.percentile(lens2_arr, 95)),
+        "attempt2_len_max": float(lens2_arr.max()),
+        "attempt2_truncated_frac": float(np.mean(lens2_arr >= cfg.train.max_new_tokens_attempt2)),
     }
     metrics["delta"] = metrics["acc_attempt2"] - metrics["acc_attempt1"]
     return metrics
