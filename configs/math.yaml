@@ -72,7 +72,7 @@ train:
   seed: 3407
 
 eval:
-  batch_size: 1                 # batch=8 stalled at 43min/batch on Spark — single-sample is faster per-question with FA2's poor batching here
+  batch_size: 16                # eval is gradient-free generation only — pad="longest" makes batched eval cheap. raise if mem holds
   max_examples: 16              # tight scope so the run completes overnight
   generation_temperature: 0.6   # Qwen3 + greedy = infinite loops in thinking mode; >0 required
 

@@ -375,7 +375,7 @@ def two_attempt_rollout(
 
     x1 = tokenizer(
         batch["text"],
-        padding="max_length",
+        padding="longest",
         truncation=True,
         max_length=train_cfg.max_prompt_length_attempt1,
         padding_side="left",
@@ -408,7 +408,7 @@ def two_attempt_rollout(
     ]
     x2 = tokenizer(
         init_x2,
-        padding="max_length",
+        padding="longest",
         truncation=True,
         max_length=train_cfg.max_prompt_length_attempt2,
         padding_side="left",
@@ -465,8 +465,8 @@ def train_stage_1(
 
             FastLanguageModel.for_training(model)
             with torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16):
-                action1 = roll.action1_tokens.clone()
-                action2 = roll.action2_tokens.clone()
+                action1 = roll.action1_tokens
+                action2 = roll.action2_tokens
 
                 with torch.no_grad(), model.disable_adapter():
                     base_logp_a1 = get_log_probs(model, action1, roll.x1_len)
@@ -516,8 +516,8 @@ def train_stage_2(
 
             FastLanguageModel.for_training(model)
             with torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16):
-                action1 = roll.action1_tokens.clone()
-                action2 = roll.action2_tokens.clone()
+                action1 = roll.action1_tokens
+                action2 = roll.action2_tokens
 
                 with torch.no_grad(), model.disable_adapter():
                     base_logp_a1 = get_log_probs(model, action1, roll.x1_len)
