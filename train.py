@@ -269,26 +269,39 @@ def load_and_prepare_data(
 # --- Log-prob and KL helpers --------------------------------------------------
 
 
-def get_log_probs(
-    model: Any, input_ids: Tensor, prompt_len: int
-) -> tuple[Tensor, Tensor]:
-    """Per-token + per-vocab log probs over the *generated* portion only.
+def get_log_probs(model: Any, input_ids: Tensor, prompt_len: int) -> Tensor:
+    """Per-token log probabilities of the *generated* tokens only.
 
-    Slices the prompt off and shifts logits by one so they align with the next-token
-    targets. Returns ``(token_log_probs, full_log_probs)`` both shaped over the
-    generated span: ``[B, gen_len]`` and ``[B, gen_len, V]``.
+    Returns ``[B, gen_len]`` — log π(y_t | y_<t, x) for each generated token y_t.
 
-    Crucially: slices logits to the generated span *before* ``log_softmax`` to
-    avoid materializing a ``[B, full_seq, V]`` log-prob tensor — that tripped
-    OOM on long attempt-2 prompts (~6K tokens) at batch=8.
+    Two memory tricks:
+      1. ``logits_to_keep`` (when supported by the model's forward) makes the model
+         skip computing logits for the prompt portion entirely. For long prompts
+         this is a 4-10× reduction in the peak logits tensor.
+      2. ``selective_log_softmax`` via ``gather - logsumexp``: we only need the
+         log-prob of the SAMPLED token, not the full vocab distribution. So we
+         compute ``logits[token] - logsumexp(logits, dim=-1)`` directly, never
+         materializing the full ``[B, gen_len, V]`` log-softmax tensor.
+
+    Together these eliminate the ``[B, T, V]`` tensor that triggered OOM on
+    Stage 2 backward. KL is computed via the K3 estimator (see ``get_kl_div``)
+    which also only needs per-token log-probs — no full vocab anywhere.
     """
-    logits = model(input_ids).logits[:, :-1, :]
-    targets = input_ids[:, 1:]
-    gen_logits = logits[:, prompt_len - 1:, :]
-    gen_targets = targets[:, prompt_len - 1:]
-    full_log_probs = gen_logits.log_softmax(dim=-1)
-    token_log_probs = full_log_probs.gather(2, gen_targets.unsqueeze(-1)).squeeze(-1)
-    return token_log_probs, full_log_probs
+    gen_len = input_ids.size(1) - prompt_len
+    # Some HF models accept `logits_to_keep` to skip prompt-side logit compute.
+    # We pass gen_len + 1 because the last logit of the sequence is the next-token
+    # prediction (excluded), and we need gen_len log-probs aligned with targets.
+    try:
+        logits = model(input_ids, logits_to_keep=gen_len + 1).logits
+    except TypeError:
+        logits = model(input_ids).logits
+    # Align logits with next-token targets: drop the last position (no target after EOS),
+    # then slice to the generated span.
+    logits = logits[:, -(gen_len + 1):-1, :]    # [B, gen_len, V]
+    targets = input_ids[:, prompt_len:]         # [B, gen_len]
+    # Selective log-softmax: log π(y_t) = logits[y_t] - logsumexp(logits, V)
+    selected = logits.gather(-1, targets.unsqueeze(-1)).squeeze(-1)
+    return selected - torch.logsumexp(logits, dim=-1)
 
 
 def get_eos_mask(answer_ids: Tensor, tokenizer: Any) -> Tensor:
@@ -297,15 +310,20 @@ def get_eos_mask(answer_ids: Tensor, tokenizer: Any) -> Tensor:
     return (torch.cumsum(is_eos, dim=1) <= 1).int()
 
 
-def get_kl_div(base_log_probs: Tensor, log_probs: Tensor, mask: Tensor) -> Tensor:
-    """Forward KL ``D_KL(pi_theta || pi_ref)`` summed over vocab and answer-masked.
+def get_kl_div(ref_log_probs: Tensor, policy_log_probs: Tensor, mask: Tensor) -> Tensor:
+    """K3 KL estimator (Schulman): unbiased ``E[D_KL(π || π_ref)]`` from per-token log-probs only.
 
-    Computed as ``sum_v exp(log_pi) * (log_pi - log_pi_ref)``. ``base_log_probs``
-    is from the disabled-adapter forward pass and carries no gradient; gradient
-    flows back to the policy through ``log_probs``.
+    ``K3 = exp(log π_ref - log π) - (log π_ref - log π) - 1``. Always ≥ 0, equals 0 when
+    distributions match, and is unbiased for the forward KL. Crucially, it requires
+    ONLY the per-token log-probabilities of sampled tokens — no full vocab distribution,
+    so we never materialize a ``[B, T, V]`` tensor.
+
+    Both inputs are shape ``[B, gen_len]``. ``ref_log_probs`` is from the disabled-adapter
+    forward (no grad); ``policy_log_probs`` carries the gradient.
     """
-    kl = (log_probs.exp() * (log_probs - base_log_probs)).sum(-1)
-    return (kl * mask).sum(-1) / mask.sum(-1).clamp(min=1)
+    diff = ref_log_probs - policy_log_probs
+    kl_per_token = torch.exp(diff) - diff - 1
+    return (kl_per_token * mask).sum(-1) / mask.sum(-1).clamp(min=1)
 
 
 # --- Rollout -----------------------------------------------------------------
@@ -451,12 +469,12 @@ def train_stage_1(
                 action2 = roll.action2_tokens.clone()
 
                 with torch.no_grad(), model.disable_adapter():
-                    _, base_full_logp = get_log_probs(model, action1, roll.x1_len)
+                    base_logp_a1 = get_log_probs(model, action1, roll.x1_len)
 
-                _, full_logp_a1 = get_log_probs(model, action1, roll.x1_len)
-                kl_div = get_kl_div(base_full_logp, full_logp_a1, roll.attempt1_answer_mask)
+                logp_a1 = get_log_probs(model, action1, roll.x1_len)
+                kl_div = get_kl_div(base_logp_a1, logp_a1, roll.attempt1_answer_mask)
 
-                logp_a2, _ = get_log_probs(model, action2, roll.x2_len)
+                logp_a2 = get_log_probs(model, action2, roll.x2_len)
                 reward2_t = torch.tensor(roll.reward2, device=model.device, dtype=logp_a2.dtype)
                 pg_term = _masked_mean_logp(logp_a2, roll.attempt2_answer_mask) * reward2_t
 
@@ -502,16 +520,16 @@ def train_stage_2(
                 action2 = roll.action2_tokens.clone()
 
                 with torch.no_grad(), model.disable_adapter():
-                    _, base_full_logp_1 = get_log_probs(model, action1, roll.x1_len)
-                logp_a1, full_logp_a1 = get_log_probs(model, action1, roll.x1_len)
-                kl_1 = get_kl_div(base_full_logp_1, full_logp_a1, roll.attempt1_answer_mask)
+                    base_logp_a1 = get_log_probs(model, action1, roll.x1_len)
+                logp_a1 = get_log_probs(model, action1, roll.x1_len)
+                kl_1 = get_kl_div(base_logp_a1, logp_a1, roll.attempt1_answer_mask)
                 reward1_t = torch.tensor(roll.reward1, device=model.device, dtype=logp_a1.dtype)
                 pg_attempt1 = _masked_mean_logp(logp_a1, roll.attempt1_answer_mask) * reward1_t
 
                 with torch.no_grad(), model.disable_adapter():
-                    _, base_full_logp_2 = get_log_probs(model, action2, roll.x2_len)
-                logp_a2, full_logp_a2 = get_log_probs(model, action2, roll.x2_len)
-                kl_2 = get_kl_div(base_full_logp_2, full_logp_a2, roll.attempt2_answer_mask)
+                    base_logp_a2 = get_log_probs(model, action2, roll.x2_len)
+                logp_a2 = get_log_probs(model, action2, roll.x2_len)
+                kl_2 = get_kl_div(base_logp_a2, logp_a2, roll.attempt2_answer_mask)
                 reward2_t = torch.tensor(roll.reward2, device=model.device, dtype=logp_a2.dtype)
                 shaped_reward2 = reward2_t + train_cfg.alpha * (reward2_t - reward1_t)
                 pg_attempt2 = _masked_mean_logp(logp_a2, roll.attempt2_answer_mask) * shaped_reward2
