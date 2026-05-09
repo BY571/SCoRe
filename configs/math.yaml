@@ -56,8 +56,8 @@ reward:
   answer_extractor: math_final_answer
 
 train:
-  stage1_batch_size: 8           # Stage 1 has fewer log-prob calls; batch=8 fits comfortably
-  stage2_batch_size: 4           # Stage 2 doubles log_prob compute (KL on both attempts) — drop to half batch
+  stage1_batch_size: 8
+  stage2_batch_size: 8           # raised 4→8: K3 KL + selective log-softmax kill the [B,T,V] tensor that previously forced half-batch
   learning_rate: 5.0e-6
   stage1_epochs: 1
   stage2_epochs: 1
