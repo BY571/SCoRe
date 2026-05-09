@@ -486,8 +486,12 @@ def train_stage_1(
 
             FastLanguageModel.for_training(model)
             with torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16):
-                action1 = roll.action1_tokens
-                action2 = roll.action2_tokens
+                # .clone() strips the inference-mode flag inherited from the rollout
+                # (FastLanguageModel.for_inference). Without it, get_log_probs's forward
+                # produces inference tensors that can't enter autograd:
+                # "Inference tensors cannot be saved for backward."
+                action1 = roll.action1_tokens.clone()
+                action2 = roll.action2_tokens.clone()
 
                 with torch.no_grad(), model.disable_adapter():
                     base_logp_a1 = get_log_probs(model, action1, roll.x1_len)
@@ -543,8 +547,12 @@ def train_stage_2(
 
             FastLanguageModel.for_training(model)
             with torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16):
-                action1 = roll.action1_tokens
-                action2 = roll.action2_tokens
+                # .clone() strips the inference-mode flag inherited from the rollout
+                # (FastLanguageModel.for_inference). Without it, get_log_probs's forward
+                # produces inference tensors that can't enter autograd:
+                # "Inference tensors cannot be saved for backward."
+                action1 = roll.action1_tokens.clone()
+                action2 = roll.action2_tokens.clone()
 
                 with torch.no_grad(), model.disable_adapter():
                     base_logp_a1 = get_log_probs(model, action1, roll.x1_len)
