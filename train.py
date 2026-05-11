@@ -76,6 +76,7 @@ class DatasetConfig:
     input_field: str
     target_field: str
     test_split_size: int
+    config_name: str | None = None    # for HF datasets that require a sub-config (e.g. openai/gsm8k "main")
 
 
 @dataclass
@@ -228,8 +229,8 @@ def load_and_prepare_data(
       - target:   raw ground-truth string from `target_field`
       - messages: the messages list, used to append assistant + self-correction
     """
-    dataset = load_dataset(dataset_cfg.name, split="train")
-    test_dataset = load_dataset(dataset_cfg.name, split="test")
+    dataset = load_dataset(dataset_cfg.name, name=dataset_cfg.config_name, split="train")
+    test_dataset = load_dataset(dataset_cfg.name, name=dataset_cfg.config_name, split="test")
     if dataset_cfg.test_split_size > len(test_dataset):
         raise ValueError(
             f"test_split_size={dataset_cfg.test_split_size} exceeds "

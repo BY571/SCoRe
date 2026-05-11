@@ -166,6 +166,45 @@ def _peel_math_wrappers(text: str) -> str:
     return text
 
 
+_GSM8K_HASH = re.compile(r"####\s*(-?[\d,]+(?:\.\d+)?)")
+_NUMBER = re.compile(r"-?\d[\d,]*(?:\.\d+)?")
+
+
+def _normalize_number(s: str) -> str:
+    return s.strip().rstrip(".").replace(",", "").strip()
+
+
+@register_extractor("gsm8k_hash")
+def gsm8k_hash(text: str) -> str:
+    """Extract the final numeric answer from a GSM8K example or model output.
+
+    Handles both input shapes the training loop encounters:
+      - Model predictions: ``<answer>...</answer>`` (the format the system
+        prompt asks for). Last tag wins, contents normalized to a bare number.
+      - Dataset targets: GSM8K's native ``#### N`` marker at the end of the
+        reasoning trace. Last marker wins so intermediate ``<<48/2=24>>``
+        annotations don't trip it.
+      - Lenient last-resort: the final numeric literal in the text. Lets the
+        format reward differ from the correctness reward — a model that gets
+        the number right without using ``<answer>`` tags still scores 0.5.
+
+    Returns the normalized number as a string (commas stripped, sign and
+    decimals preserved), or ``""`` if nothing parseable was found.
+    """
+    tag_matches = re.findall(r"<answer>\s*(.*?)\s*</answer>", text, flags=re.DOTALL)
+    if tag_matches:
+        return _normalize_number(tag_matches[-1])
+
+    hash_matches = _GSM8K_HASH.findall(text)
+    if hash_matches:
+        return _normalize_number(hash_matches[-1])
+
+    nums = _NUMBER.findall(text)
+    if nums:
+        return _normalize_number(nums[-1])
+    return ""
+
+
 @register_extractor("math_final_answer")
 def math_final_answer(text: str) -> str:
     """Extract the final answer from a model output or reference solution.
