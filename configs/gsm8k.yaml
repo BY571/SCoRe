@@ -56,8 +56,8 @@ reward:
   answer_extractor: gsm8k_hash
 
 train:
-  stage1_batch_size: 16             # 1.5B bf16 + shorter sequences: room for 2-4× the math-config batch
-  stage2_batch_size: 16
+  stage1_batch_size: 32             # 1.5B bf16 + 2-4k context: ~3-4× smaller activations vs 4B-4bit at 12k -> 4× batch
+  stage2_batch_size: 32             # stage 2 backward holds both attempts' graphs — peak memory anchor
   learning_rate: 5.0e-6
   stage1_epochs: 1
   stage2_epochs: 1
@@ -72,6 +72,6 @@ train:
   seed: 3407
 
 eval:
-  batch_size: 32                    # gradient-free, can push higher than train
+  batch_size: 64                    # gradient-free, push higher than train
   max_examples: 200
   generation_temperature: 0.0       # Qwen2.5-Instruct has no thinking-mode loop pathology — greedy is fine
