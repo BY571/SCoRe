@@ -191,7 +191,7 @@ def load_model_and_tokenizer(cfg: ModelConfig) -> tuple[Any, Any]:
         lora_dropout=cfg.lora.dropout,
         target_modules=cfg.lora.target_modules,
         bias="none",
-        use_gradient_checkpointing="unsloth",  # re-enabled inside Unsloth's official DGX Spark container; the prior wedge was on a stale PyTorch/CUDA venv, their reference RL notebooks use this
+        use_gradient_checkpointing=True,  # NOT "unsloth" — that mode offloads gradients to host RAM, saturates Spark's unified memory bandwidth and wedges sshd. In-VRAM checkpointing (True) leaves the host kernel responsive.
         random_state=3407,
     )
     if cfg.chat_template:
