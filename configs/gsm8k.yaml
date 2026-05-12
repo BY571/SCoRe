@@ -2,7 +2,7 @@ run_name: score-gsm8k
 wandb_project: SCoRe-GSM8K
 
 model:
-  name: Qwen/Qwen2.5-1.5B-Instruct
+  name: Qwen/Qwen3-0.6B #Qwen/Qwen2.5-1.5B-Instruct
   max_seq_length: 6144              # GSM8K prompt (~250) + attempt1 (~1024) + self-correction wrapper + new (1024) + headroom
   load_in_4bit: false               # 1.5B in bf16 = ~3 GB; fits comfortably, cleaner gradients than NF4 dequant
   chat_template: ""                 # empty = use tokenizer's built-in (Qwen2.5-Instruct ships ChatML)
@@ -30,48 +30,40 @@ dataset:
 
 prompts:
   system: |
-    You are a math tutor. Solve each problem in two parts:
-
-    1. Wrap all your reasoning in <think>...</think> tags. Work through the
-       problem step by step inside that block.
-    2. After </think>, wrap your final answer in <answer>...</answer> tags.
-       Put only the bare numeric answer between the tags — no units, no
-       leading "The answer is", just the number.
-
-    Answer-format examples:
-    - <answer>42</answer>
-    - <answer>3</answer>
-    - <answer>-7</answer>
-    - <answer>1.5</answer>
+    You are a clever math tutor. For each problem, provide a detailed solution with reasoning steps.
+    Wrap all your reasoning in <think>...</think> tags. Work through the problem step by step inside that block.
+    After </think>, wrap your final answer in <answer>...</answer> tags.
+    Put only the bare numeric answer between the tags — no units, no
+    leading "The answer is", just the number.
 
   self_correction: |
     There might be an error in the solution above. Review the prior reasoning,
-    identify any mistakes, and rewrite the solution.
+    identify mistakes or errors, if any, and rewrite the solution.
 
-    Use the same format: <think>...</think> for your corrected reasoning, then
-    <answer>...</answer> for your final answer.
+    Use the same format: <think>...</think> for your corrected reasoning, and provide
+    the final answer with <answer>...</answer>.
 
 reward:
   fn: format_and_match              # 0.25 <think> + 0.25 <answer> + 0.5 correct number
   answer_extractor: gsm8k_hash
 
 train:
-  stage1_batch_size: 8              # bumped DOWN 32->8: per-step generation budget dominates wallclock; Unsloth GRPO reference uses tiny batches
-  stage2_batch_size: 8              # stage 2 backward holds both attempts' graphs — peak memory anchor
+  stage1_batch_size: 32              # bumped DOWN 32->8: per-step generation budget dominates wallclock; Unsloth GRPO reference uses tiny batches
+  stage2_batch_size: 32              # stage 2 backward holds both attempts' graphs — peak memory anchor
   learning_rate: 2.0e-5             # raised 5e-6->2e-5: Unsloth ref uses 5e-5; we're still conservative
   stage1_epochs: 1
   stage2_epochs: 1
   beta1: 0.01
   beta2: 0.1
   alpha: 10.0
-  max_new_tokens_attempt1: 768      # 768 compromise: less truncation than 512, ~25% less burn than 1024
-  max_new_tokens_attempt2: 768
+  max_new_tokens_attempt1: 840
+  max_new_tokens_attempt2: 840
   max_prompt_length_attempt1: 1024  # system + question = ~250 tokens; 1024 leaves headroom
   max_prompt_length_attempt2: 2560  # attempt1 prompt + full attempt1 output (up to 1024) + self-correction wrapper
-  generation_temperature: 1.0
+  generation_temperature: 0.6
   seed: 3407
 
 eval:
-  batch_size: 64                    # gradient-free, push higher than train
-  max_examples: 200
-  generation_temperature: 0.0       # Qwen2.5-Instruct has no thinking-mode loop pathology — greedy is fine
+  batch_size: 100       
+  max_examples: 400
+  generation_temperature: 0.0
