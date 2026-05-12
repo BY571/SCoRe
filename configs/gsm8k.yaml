@@ -48,8 +48,8 @@ reward:
   answer_extractor: gsm8k_hash
 
 train:
-  stage1_batch_size: 32              # bumped DOWN 32->8: per-step generation budget dominates wallclock; Unsloth GRPO reference uses tiny batches
-  stage2_batch_size: 32              # stage 2 backward holds both attempts' graphs — peak memory anchor
+  stage1_batch_size: 20             # dropped 32->20: flatten attempt-2 prefill memory peak, prevents sshd wedge under load
+  stage2_batch_size: 20             # stage 2 backward holds both attempts' graphs — keep matched to stage 1
   learning_rate: 2.0e-5             # raised 5e-6->2e-5: Unsloth ref uses 5e-5; we're still conservative
   stage1_epochs: 1
   stage2_epochs: 1
