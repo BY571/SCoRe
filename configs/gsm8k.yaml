@@ -6,8 +6,8 @@ model:
   max_seq_length: 6144              # GSM8K prompt (~250) + attempt1 (~1024) + self-correction wrapper + new (1024) + headroom
   load_in_4bit: false               # 1.5B in bf16 = ~3 GB; fits comfortably, cleaner gradients than NF4 dequant
   chat_template: ""                 # empty = use tokenizer's built-in (Qwen2.5-Instruct ships ChatML)
-  fast_inference: true              # vLLM continuous batching — frees compute as samples emit EOS early; 10-20× aggregate throughput vs HF generate
-  fast_inference_gpu_mem: 0.4       # vLLM KV-cache share; Spark has 120 GB so this is ~48 GB for vLLM, plenty for our 1.5B + paged-attention KV
+  fast_inference: false             # vLLM still broken on Spark/ARM as of 2026-01
+  fast_inference_gpu_mem: 0.5
   lora:
     r: 16
     alpha: 16
