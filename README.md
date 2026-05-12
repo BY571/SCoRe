@@ -42,15 +42,3 @@ Logs go to W&B (`wandb_project` in the config). LoRA adapters save to `outputs/{
 3. Add a reward function if `format_and_match` or `exact_match` don't fit.
 4. Copy `configs/gsm8k.yaml`, edit `model.*` / `dataset.*` / `prompts.*` / `reward.*`.
 5. Smoke first (`--smoke 8`), then full.
-
-### Shipped extractors
-
-| Extractor | Handles |
-|---|---|
-| `gsm8k_hash` | `<answer>N</answer>` predictions or `#### N` GSM8K targets. Falls back to last number in text. |
-| `math_final_answer` | `<answer>...</answer>` → `\boxed{...}` → `final answer is:` marker. Peels `$...$`, `\[...\]`, `\boxed{}` wrappers. |
-| `identity` | Pass-through. |
-
-### Dataset contract
-
-`train.py` reads only `dataset.input_field` and `dataset.target_field` — everything else in the dataset is ignored.
