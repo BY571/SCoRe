@@ -352,6 +352,28 @@ class Rollout:
         return self.action2_tokens[:, self.x2_len:]
 
 
+def _pad_action_tensor(
+    prompt_ids: list,
+    gen_ids: list,
+    pad_id: int,
+    device: torch.device,
+) -> tuple[Tensor, int]:
+    """Reassemble fast_generate's variable-length outputs into a [B, T] tensor.
+
+    Mirrors HF ``model.generate``'s output layout: prompts left-padded to a
+    common length, generated tokens right-padded. Downstream
+    ``get_log_probs`` and ``get_eos_mask`` use the layout unchanged.
+    """
+    max_prompt = max(len(p) for p in prompt_ids)
+    max_gen = max(len(g) for g in gen_ids)
+    rows: list[list[int]] = []
+    for p, g in zip(prompt_ids, gen_ids):
+        left_pad = [pad_id] * (max_prompt - len(p))
+        right_pad = [pad_id] * (max_gen - len(g))
+        rows.append(left_pad + list(p) + list(g) + right_pad)
+    return torch.tensor(rows, dtype=torch.long, device=device), max_prompt
+
+
 def two_attempt_rollout(
     model: Any,
     tokenizer: Any,
@@ -360,11 +382,18 @@ def two_attempt_rollout(
     *,
     temperature: float | None = None,
 ) -> Rollout:
-    """Run both attempts, decode, score with the configured reward.
+    """Run both attempts via Unsloth ``fast_generate`` (vLLM), score with the reward.
 
-    Note: leaves the model in inference mode (`FastLanguageModel.for_inference`).
-    Callers that train must restore it with `FastLanguageModel.for_training(model)`.
+    ``fast_generate`` returns variable-length ``RequestOutput`` per prompt — vLLM
+    does continuous batching internally, so sequences that emit EOS early free
+    up compute for samples still decoding. This is the actual speedup vs HF
+    ``model.generate``, which pads to the slowest sample in the batch.
+
+    The returned ``Rollout`` exposes the same padded ``[B, T]`` action tensors
+    HF generate produced, so log-prob / KL / mask code downstream is unchanged.
     """
+    from vllm import SamplingParams
+
     train_cfg = cfg.train
     if temperature is None:
         temperature = train_cfg.generation_temperature
@@ -372,30 +401,22 @@ def two_attempt_rollout(
     reward_fn = rf.REWARD_FNS[cfg.reward.fn]
     targets: list[str] = list(batch["target"])
     do_sample = temperature > 0.0
-    gen_temp = temperature if do_sample else 1.0
+    pad_id = tokenizer.pad_token_id
 
-    x1 = tokenizer(
-        batch["text"],
-        padding="longest",
-        truncation=True,
-        max_length=train_cfg.max_prompt_length_attempt1,
-        padding_side="left",
-        return_tensors="pt",
-    ).to(model.device)
-    x1_len = x1["input_ids"].shape[1]
-
-    FastLanguageModel.for_inference(model)
-    action1_tokens = model.generate(
-        x1["input_ids"],
-        attention_mask=x1["attention_mask"],
-        max_new_tokens=train_cfg.max_new_tokens_attempt1,
-        do_sample=do_sample,
-        temperature=gen_temp,
+    sp1 = SamplingParams(
+        temperature=temperature if do_sample else 0.0,
+        top_p=0.95 if do_sample else 1.0,
+        max_tokens=train_cfg.max_new_tokens_attempt1,
+        n=1,
     )
+    outputs1 = model.fast_generate(batch["text"], sampling_params=sp1, lora_request=None)
+    prompt1_ids = [list(o.prompt_token_ids) for o in outputs1]
+    gen1_ids = [list(o.outputs[0].token_ids) for o in outputs1]
+    answer1_text = [o.outputs[0].text for o in outputs1]
+    reward1 = reward_fn(answer1_text, targets, extractor)
+    action1_tokens, x1_len = _pad_action_tensor(prompt1_ids, gen1_ids, pad_id, model.device)
     attempt1_answer_tokens = action1_tokens[:, x1_len:]
     attempt1_answer_mask = get_eos_mask(attempt1_answer_tokens, tokenizer)
-    answer1_text = tokenizer.batch_decode(attempt1_answer_tokens, skip_special_tokens=True)
-    reward1 = reward_fn(answer1_text, targets, extractor)
 
     messages = [list(m) for m in batch["messages"]]
     for m, a in zip(messages, answer1_text):
@@ -407,27 +428,21 @@ def two_attempt_rollout(
         tokenizer.apply_chat_template(m, add_generation_prompt=True, tokenize=False)
         for m in messages
     ]
-    x2 = tokenizer(
-        init_x2,
-        padding="longest",
-        truncation=True,
-        max_length=train_cfg.max_prompt_length_attempt2,
-        padding_side="left",
-        return_tensors="pt",
-    ).to(model.device)
-    x2_len = x2["input_ids"].shape[1]
 
-    action2_tokens = model.generate(
-        x2["input_ids"],
-        attention_mask=x2["attention_mask"],
-        max_new_tokens=train_cfg.max_new_tokens_attempt2,
-        do_sample=do_sample,
-        temperature=gen_temp,
+    sp2 = SamplingParams(
+        temperature=temperature if do_sample else 0.0,
+        top_p=0.95 if do_sample else 1.0,
+        max_tokens=train_cfg.max_new_tokens_attempt2,
+        n=1,
     )
+    outputs2 = model.fast_generate(init_x2, sampling_params=sp2, lora_request=None)
+    prompt2_ids = [list(o.prompt_token_ids) for o in outputs2]
+    gen2_ids = [list(o.outputs[0].token_ids) for o in outputs2]
+    answer2_text = [o.outputs[0].text for o in outputs2]
+    reward2 = reward_fn(answer2_text, targets, extractor)
+    action2_tokens, x2_len = _pad_action_tensor(prompt2_ids, gen2_ids, pad_id, model.device)
     attempt2_answer_tokens = action2_tokens[:, x2_len:]
     attempt2_answer_mask = get_eos_mask(attempt2_answer_tokens, tokenizer)
-    answer2_text = tokenizer.batch_decode(attempt2_answer_tokens, skip_special_tokens=True)
-    reward2 = reward_fn(answer2_text, targets, extractor)
 
     return Rollout(
         action1_tokens=action1_tokens,
