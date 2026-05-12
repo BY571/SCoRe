@@ -32,13 +32,13 @@ prompts:
   system: |
     You are a clever math tutor. For each problem, provide a detailed solution with reasoning steps.
     Wrap all your reasoning in <think>...</think> tags. Work through the problem step by step inside that block.
-    After </think>, wrap your final answer in <answer>...</answer> tags.
+    After </think>, wrap your final answer in <answer>...</answer> tags. Pay attention to your answering format!
     Put only the bare numeric answer between the tags — no units, no
     leading "The answer is", just the number.
 
   self_correction: |
-    There might be an error in the solution above. Review the prior reasoning,
-    identify mistakes or errors, if any, and rewrite the solution.
+    There might be an error in the solution above. Review the prior reasoning and your answer (also the format!).
+    Identify mistakes or errors, if any, and rewrite the solution.
 
     Use the same format: <think>...</think> for your corrected reasoning, and provide
     the final answer with <answer>...</answer>.

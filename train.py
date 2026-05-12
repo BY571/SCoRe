@@ -212,7 +212,7 @@ def thinking_to_history(text: str) -> str:
     template won't strip) before appending attempt 1 as the assistant turn
     for attempt 2. No-op if no ``<think>`` tags are present.
     """
-    return _THINK_BLOCK.sub(r"[Prior reasoning: \1]", text).strip()
+    return text #_THINK_BLOCK.sub(r"", text).strip()
 
 
 def load_and_prepare_data(
