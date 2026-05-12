@@ -447,6 +447,55 @@ def _masked_mean_logp(log_probs: Tensor, mask: Tensor) -> Tensor:
     return (log_probs * mask).sum(-1) / mask.sum(-1).clamp(min=1)
 
 
+def _log_rollouts_table(
+    stage: str,
+    batch: dict[str, list],
+    roll: Rollout,
+    max_new1: int,
+    max_new2: int,
+    k: int = 4,
+) -> None:
+    """Log up to k rollouts as a wandb Table for debugging generation quality.
+
+    Per-step scalars (reward, KL, length) tell you *that* something changed.
+    A few raw samples tell you *what* — whether the model is truncating before
+    `<answer>`, breaking format, or actually self-correcting. The truncation
+    columns let you sort by ``trunc1=True`` to see what the model produces
+    when it runs out of token budget.
+
+    ``problem_tail`` shows only the last ~1200 chars of the (chat-templated)
+    prompt — enough to see the question without flooding the cell with the
+    system prompt.
+    """
+    n = min(k, len(roll.answer1_text))
+    if n == 0:
+        return
+    lens1 = roll.attempt1_answer_mask.sum(-1).cpu().tolist()
+    lens2 = roll.attempt2_answer_mask.sum(-1).cpu().tolist()
+    targets = list(batch["target"])
+    table = wandb.Table(columns=[
+        "problem_tail", "target",
+        "attempt1", "attempt2",
+        "reward1", "reward2",
+        "len1", "len2", "trunc1", "trunc2",
+    ])
+    for i in range(n):
+        prompt = batch["text"][i]
+        table.add_data(
+            prompt[-1200:] if len(prompt) > 1200 else prompt,
+            targets[i],
+            roll.answer1_text[i],
+            roll.answer2_text[i],
+            float(roll.reward1[i]),
+            float(roll.reward2[i]),
+            int(lens1[i]),
+            int(lens2[i]),
+            bool(lens1[i] >= max_new1),
+            bool(lens2[i] >= max_new2),
+        )
+    wandb.log({f"{stage}/rollouts": table})
+
+
 def _length_stats(mask: Tensor, max_new: int) -> tuple[dict[str, float], np.ndarray]:
     """Per-sample generated lengths from the EOS mask.
 
@@ -525,6 +574,10 @@ def train_stage_1(
                 "stage1/attempt1_lens_hist": wandb.Histogram(a1_lens),
                 "stage1/attempt2_lens_hist": wandb.Histogram(a2_lens),
             })
+            _log_rollouts_table(
+                "stage1", batch, roll,
+                train_cfg.max_new_tokens_attempt1, train_cfg.max_new_tokens_attempt2,
+            )
 
     return model
 
@@ -596,6 +649,10 @@ def train_stage_2(
                 "stage2/attempt1_lens_hist": wandb.Histogram(a1_lens),
                 "stage2/attempt2_lens_hist": wandb.Histogram(a2_lens),
             })
+            _log_rollouts_table(
+                "stage2", batch, roll,
+                train_cfg.max_new_tokens_attempt1, train_cfg.max_new_tokens_attempt2,
+            )
 
     return model
 
@@ -616,6 +673,7 @@ def evaluate(
     lens1: list[int] = []
     lens2: list[int] = []
     loader = subset.iter(batch_size=cfg.eval.batch_size)
+    first_batch = True
     for batch in tqdm(loader, desc="Eval", total=(n + cfg.eval.batch_size - 1) // cfg.eval.batch_size):
         roll = two_attempt_rollout(
             model, tokenizer, batch, cfg, temperature=cfg.eval.generation_temperature
@@ -624,6 +682,13 @@ def evaluate(
         rewards2.extend(roll.reward2)
         lens1.extend(roll.attempt1_answer_mask.sum(-1).cpu().tolist())
         lens2.extend(roll.attempt2_answer_mask.sum(-1).cpu().tolist())
+        if first_batch:
+            _log_rollouts_table(
+                "eval", batch, roll,
+                cfg.train.max_new_tokens_attempt1, cfg.train.max_new_tokens_attempt2,
+                k=8,
+            )
+            first_batch = False
 
     lens1_arr = np.array(lens1)
     lens2_arr = np.array(lens2)

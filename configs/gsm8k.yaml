@@ -3,7 +3,7 @@ wandb_project: SCoRe-GSM8K
 
 model:
   name: Qwen/Qwen2.5-1.5B-Instruct
-  max_seq_length: 4096              # GSM8K prompt (~200) + attempt1 (~512) + self-correction wrapper + new (512) + headroom
+  max_seq_length: 6144              # GSM8K prompt (~250) + attempt1 (~1024) + self-correction wrapper + new (1024) + headroom
   load_in_4bit: false               # 1.5B in bf16 = ~3 GB; fits comfortably, cleaner gradients than NF4 dequant
   chat_template: ""                 # empty = use tokenizer's built-in (Qwen2.5-Instruct ships ChatML)
   fast_inference: false             # vLLM still broken on Spark/ARM as of 2026-01
@@ -64,10 +64,10 @@ train:
   beta1: 0.01
   beta2: 0.1
   alpha: 10.0
-  max_new_tokens_attempt1: 512      # GSM8K answers fit in <300 tokens even with verbose <think>
-  max_new_tokens_attempt2: 512
+  max_new_tokens_attempt1: 1024     # bumped 512->1024: prior run drifted because attempt2 hit cap before <answer>
+  max_new_tokens_attempt2: 1024
   max_prompt_length_attempt1: 1024  # system + question = ~250 tokens; 1024 leaves headroom
-  max_prompt_length_attempt2: 2048  # attempt1 prompt + full attempt1 output + self-correction
+  max_prompt_length_attempt2: 2560  # attempt1 prompt + full attempt1 output (up to 1024) + self-correction wrapper
   generation_temperature: 1.0
   seed: 3407
 
