@@ -311,28 +311,20 @@ def get_eos_mask(answer_ids: Tensor, tokenizer: Any) -> Tensor:
     return (torch.cumsum(is_eos, dim=1) <= 1).int()
 
 
-def get_kl_div(
-    ref_log_probs: Tensor,
-    policy_log_probs: Tensor,
-    mask: Tensor,
-    length_norm: int,
-) -> Tensor:
-    """K3 KL estimator (Schulman) with Dr.GRPO-style constant-length normalization.
+def get_kl_div(ref_log_probs: Tensor, policy_log_probs: Tensor, mask: Tensor) -> Tensor:
+    """K3 KL estimator (Schulman): unbiased ``E[D_KL(π || π_ref)]`` from per-token log-probs only.
 
-    ``K3 = exp(log π_ref - log π) - (log π_ref - log π) - 1``. Always ≥ 0, unbiased
-    forward KL. Requires only per-token log-probs of sampled tokens — no ``[B, T, V]``.
+    ``K3 = exp(log π_ref - log π) - (log π_ref - log π) - 1``. Always ≥ 0, equals 0 when
+    distributions match, and is unbiased for the forward KL. Crucially, it requires
+    ONLY the per-token log-probabilities of sampled tokens — no full vocab distribution,
+    so we never materialize a ``[B, T, V]`` tensor.
 
-    Length normalization: sum-over-tokens divided by a CONSTANT ``length_norm`` (the
-    configured ``max_new_tokens`` cap), NOT the per-sample actual length. With actual
-    length, longer rollouts dilute their own KL — the policy can dodge the penalty by
-    generating more "easy" (low-KL) tokens. Constant normalization decouples per-token
-    KL weight from the rollout length, matching the Dr.GRPO fix.
-
-    Both inputs are shape ``[B, gen_len]``.
+    Both inputs are shape ``[B, gen_len]``. ``ref_log_probs`` is from the disabled-adapter
+    forward (no grad); ``policy_log_probs`` carries the gradient.
     """
     diff = ref_log_probs - policy_log_probs
     kl_per_token = torch.exp(diff) - diff - 1
-    return (kl_per_token * mask).sum(-1) / length_norm
+    return (kl_per_token * mask).sum(-1) / mask.sum(-1).clamp(min=1)
 
 
 # --- Rollout -----------------------------------------------------------------
@@ -451,16 +443,8 @@ def two_attempt_rollout(
     )
 
 
-def _masked_sum_logp(log_probs: Tensor, mask: Tensor, length_norm: int) -> Tensor:
-    """Sum per-token log-probs over the generated span, divided by a CONSTANT
-    ``length_norm`` (max_new_tokens), not by the actual mask sum.
-
-    Dr.GRPO-style normalization. The per-sample mean form (divide by actual length)
-    lets the policy game the gradient signal by inflating generation length, because
-    each new token then carries less weight. Dividing by a constant means more tokens
-    = more gradient, and individual token weight is fixed across samples.
-    """
-    return (log_probs * mask).sum(-1) / length_norm
+def _masked_mean_logp(log_probs: Tensor, mask: Tensor) -> Tensor:
+    return (log_probs * mask).sum(-1) / mask.sum(-1).clamp(min=1)
 
 
 def _log_rollouts_table(
@@ -563,17 +547,11 @@ def train_stage_1(
                     base_logp_a1 = get_log_probs(model, action1, roll.x1_len)
 
                 logp_a1 = get_log_probs(model, action1, roll.x1_len)
-                kl_div = get_kl_div(
-                    base_logp_a1, logp_a1, roll.attempt1_answer_mask,
-                    length_norm=train_cfg.max_new_tokens_attempt1,
-                )
+                kl_div = get_kl_div(base_logp_a1, logp_a1, roll.attempt1_answer_mask)
 
                 logp_a2 = get_log_probs(model, action2, roll.x2_len)
                 reward2_t = torch.tensor(roll.reward2, device=model.device, dtype=logp_a2.dtype)
-                pg_term = _masked_sum_logp(
-                    logp_a2, roll.attempt2_answer_mask,
-                    length_norm=train_cfg.max_new_tokens_attempt2,
-                ) * reward2_t
+                pg_term = _masked_mean_logp(logp_a2, roll.attempt2_answer_mask) * reward2_t
 
                 loss = (-pg_term + train_cfg.beta2 * kl_div).mean()
 
@@ -633,29 +611,17 @@ def train_stage_2(
                 with torch.no_grad(), model.disable_adapter():
                     base_logp_a1 = get_log_probs(model, action1, roll.x1_len)
                 logp_a1 = get_log_probs(model, action1, roll.x1_len)
-                kl_1 = get_kl_div(
-                    base_logp_a1, logp_a1, roll.attempt1_answer_mask,
-                    length_norm=train_cfg.max_new_tokens_attempt1,
-                )
+                kl_1 = get_kl_div(base_logp_a1, logp_a1, roll.attempt1_answer_mask)
                 reward1_t = torch.tensor(roll.reward1, device=model.device, dtype=logp_a1.dtype)
-                pg_attempt1 = _masked_sum_logp(
-                    logp_a1, roll.attempt1_answer_mask,
-                    length_norm=train_cfg.max_new_tokens_attempt1,
-                ) * reward1_t
+                pg_attempt1 = _masked_mean_logp(logp_a1, roll.attempt1_answer_mask) * reward1_t
 
                 with torch.no_grad(), model.disable_adapter():
                     base_logp_a2 = get_log_probs(model, action2, roll.x2_len)
                 logp_a2 = get_log_probs(model, action2, roll.x2_len)
-                kl_2 = get_kl_div(
-                    base_logp_a2, logp_a2, roll.attempt2_answer_mask,
-                    length_norm=train_cfg.max_new_tokens_attempt2,
-                )
+                kl_2 = get_kl_div(base_logp_a2, logp_a2, roll.attempt2_answer_mask)
                 reward2_t = torch.tensor(roll.reward2, device=model.device, dtype=logp_a2.dtype)
                 shaped_reward2 = reward2_t + train_cfg.alpha * (reward2_t - reward1_t)
-                pg_attempt2 = _masked_sum_logp(
-                    logp_a2, roll.attempt2_answer_mask,
-                    length_norm=train_cfg.max_new_tokens_attempt2,
-                ) * shaped_reward2
+                pg_attempt2 = _masked_mean_logp(logp_a2, roll.attempt2_answer_mask) * shaped_reward2
 
                 loss = (
                     -pg_attempt1 - pg_attempt2
