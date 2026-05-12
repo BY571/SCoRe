@@ -191,7 +191,7 @@ def load_model_and_tokenizer(cfg: ModelConfig) -> tuple[Any, Any]:
         lora_dropout=cfg.lora.dropout,
         target_modules=cfg.lora.target_modules,
         bias="none",
-        use_gradient_checkpointing=True,  # was "unsloth" — that mode offloads gradients to RAM and wedges Spark's unified memory
+        use_gradient_checkpointing="unsloth",  # re-enabled inside Unsloth's official DGX Spark container; the prior wedge was on a stale PyTorch/CUDA venv, their reference RL notebooks use this
         random_state=3407,
     )
     if cfg.chat_template:
@@ -749,7 +749,10 @@ def main() -> None:
             f"eval cap to {cfg.eval.max_examples}"
         )
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=cfg.train.learning_rate)
+    # bitsandbytes 8-bit AdamW: ~4× smaller optimizer state vs fp32 Adam. Same convergence
+    # behavior on LoRA finetuning per the Unsloth/TRL reference RL notebooks.
+    from bitsandbytes.optim import AdamW8bit
+    optimizer = AdamW8bit(filter(lambda p: p.requires_grad, model.parameters()), lr=cfg.train.learning_rate)
 
     out_root = Path(cfg.output.dir) / cfg.run_name
 

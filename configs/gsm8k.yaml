@@ -56,16 +56,16 @@ reward:
   answer_extractor: gsm8k_hash
 
 train:
-  stage1_batch_size: 32             # 1.5B bf16 + 2-4k context: ~3-4× smaller activations vs 4B-4bit at 12k -> 4× batch
-  stage2_batch_size: 32             # stage 2 backward holds both attempts' graphs — peak memory anchor
-  learning_rate: 5.0e-6
+  stage1_batch_size: 8              # bumped DOWN 32->8: per-step generation budget dominates wallclock; Unsloth GRPO reference uses tiny batches
+  stage2_batch_size: 8              # stage 2 backward holds both attempts' graphs — peak memory anchor
+  learning_rate: 2.0e-5             # raised 5e-6->2e-5: Unsloth ref uses 5e-5; we're still conservative
   stage1_epochs: 1
   stage2_epochs: 1
   beta1: 0.01
   beta2: 0.1
   alpha: 10.0
-  max_new_tokens_attempt1: 1024     # bumped 512->1024: prior run drifted because attempt2 hit cap before <answer>
-  max_new_tokens_attempt2: 1024
+  max_new_tokens_attempt1: 768      # 768 compromise: less truncation than 512, ~25% less burn than 1024
+  max_new_tokens_attempt2: 768
   max_prompt_length_attempt1: 1024  # system + question = ~250 tokens; 1024 leaves headroom
   max_prompt_length_attempt2: 2560  # attempt1 prompt + full attempt1 output (up to 1024) + self-correction wrapper
   generation_temperature: 1.0
