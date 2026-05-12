@@ -2,10 +2,9 @@
 
 Task-agnostic implementation of [Training Language Models to Self-Correct via Reinforcement Learning](https://arxiv.org/abs/2409.12917) (Kumar et al., ICLR 2025), built on [Unsloth](https://github.com/unslothai/unsloth) LoRA for small open-weight models.
 
-We use the `<think>...</think><answer>...</answer>` reasoning-tag format introduced by [DeepSeek-R1](https://arxiv.org/abs/2501.12948) (the GRPO paper) — model reasons inside `<think>`, gives the final answer inside `<answer>`.
-
 Core algorithm is paper-faithful: Stage I anchors attempt 1 to the reference policy via KL, Stage II adds the reward-shaping bonus `α · (r(y2) − r(y1))`. Adaptations we introduced:
 
+- **Reasoning-tag format from [DeepSeek-R1](https://arxiv.org/abs/2501.12948)** (the GRPO paper): model reasons inside `<think>...</think>` and gives the final answer inside `<answer>...</answer>`. The compound reward below scores this format directly.
 - **K3 KL estimator** (Schulman): `K3 = exp(log π_ref − log π) − (log π_ref − log π) − 1`. Unbiased forward KL from per-token log-probs only — no `[B, T, V]` log-softmax tensor, which is what makes Stage II's two-graph backward fit in memory.
 - **Compound reward** (`format_and_match`): 0.25 for a `<think>...</think>` pair, 0.25 for one `<answer>...</answer>` pair, 0.5 for extracted-answer match. Gives the α-bonus more signal than pure binary and explicitly anchors format.
 - **LoRA-only**: reference policy = same model with `model.disable_adapter()`. No second model in VRAM.
