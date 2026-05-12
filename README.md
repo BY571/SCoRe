@@ -36,13 +36,6 @@ python train.py --config configs/gsm8k.yaml --smoke 8
 
 Logs go to W&B (`wandb_project` in the config). LoRA adapters save to `outputs/{run_name}/stage{1,2}/`.
 
-## W&B keys per training step
-
-- `stageN/reward_attempt1`, `stageN/reward_attempt2`, `stageN/diff_attempt2_minus_attempt1` — the SCoRe-delta you actually care about
-- `stageN/loss`, `stageN/kl_div[_attemptK]`
-- `stageN/attemptK_{len_mean,len_p95,len_max,truncated_frac}` + per-step histogram — watch `truncated_frac` to know if `max_new_tokens` is too tight
-- `stageN/rollouts` — wandb Table of sampled rollouts with prompt, target, both attempts' text, rewards, lengths. Sortable in the UI.
-
 ## Adapt to a new task
 
 1. Push your dataset to the HF Hub with `train` and `test` splits. For datasets needing a sub-config (e.g. `openai/gsm8k` has `main`/`socratic`), set `dataset.config_name`.
