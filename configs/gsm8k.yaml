@@ -64,6 +64,6 @@ train:
   seed: 3407
 
 eval:
-  batch_size: 100       
-  max_examples: 400
+  batch_size: 50                    # dropped 100->50: prior run wedged sshd at batch 100 + gen 840 (likely memory spike)
+  max_examples: 200                 # matches dataset.test_split_size — 200 / 50 = 4 batches
   generation_temperature: 0.0
