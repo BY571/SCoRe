@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+*.pyo
+wandb/
+outputs/
+data/
+api.txt
+*.ipynb
+.venv/
+.env
+unsloth_compiled_cache/
+docs/superpowers/
+.claude/
+.superpowers/

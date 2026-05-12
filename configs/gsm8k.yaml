@@ -1,0 +1,69 @@
+run_name: score-gsm8k
+wandb_project: SCoRe-GSM8K
+
+model:
+  name: Qwen/Qwen3-0.6B #Qwen/Qwen2.5-1.5B-Instruct
+  max_seq_length: 6144              # GSM8K prompt (~250) + attempt1 (~1024) + self-correction wrapper + new (1024) + headroom
+  load_in_4bit: false               # 1.5B in bf16 = ~3 GB; fits comfortably, cleaner gradients than NF4 dequant
+  chat_template: ""                 # empty = use tokenizer's built-in (Qwen2.5-Instruct ships ChatML)
+  fast_inference: false             # vLLM still broken on Spark/ARM as of 2026-01
+  fast_inference_gpu_mem: 0.5
+  lora:
+    r: 16
+    alpha: 16
+    dropout: 0.0
+    target_modules:
+      - q_proj
+      - k_proj
+      - v_proj
+      - o_proj
+      - gate_proj
+      - up_proj
+      - down_proj
+
+dataset:
+  name: openai/gsm8k
+  config_name: main                 # gsm8k has two configs: "main" (standard) and "socratic"
+  input_field: question
+  target_field: answer              # full reasoning trace ending in "#### N" — gsm8k_hash pulls N
+  test_split_size: 200
+
+prompts:
+  system: |
+    You are a clever math tutor. For each problem, provide a detailed solution with reasoning steps.
+    Wrap all your reasoning in <think>...</think> tags. Work through the problem step by step inside that block.
+    After </think>, wrap your final answer in <answer>...</answer> tags. Pay attention to your answering format!
+    Put only the bare numeric answer between the tags — no units, no
+    leading "The answer is", just the number.
+
+  self_correction: |
+    There might be an error in the solution above. Review the prior reasoning and your answer (also the format!).
+    Identify mistakes or errors, if any, and rewrite the solution.
+
+    Use the same format: <think>...</think> for your corrected reasoning, and provide
+    the final answer with <answer>...</answer>.
+
+reward:
+  fn: format_and_match              # 0.25 <think> + 0.25 <answer> + 0.5 correct number
+  answer_extractor: gsm8k_hash
+
+train:
+  stage1_batch_size: 32              # bumped DOWN 32->8: per-step generation budget dominates wallclock; Unsloth GRPO reference uses tiny batches
+  stage2_batch_size: 32              # stage 2 backward holds both attempts' graphs — peak memory anchor
+  learning_rate: 2.0e-5             # raised 5e-6->2e-5: Unsloth ref uses 5e-5; we're still conservative
+  stage1_epochs: 1
+  stage2_epochs: 1
+  beta1: 0.01
+  beta2: 0.1
+  alpha: 10.0
+  max_new_tokens_attempt1: 840
+  max_new_tokens_attempt2: 840
+  max_prompt_length_attempt1: 1024  # system + question = ~250 tokens; 1024 leaves headroom
+  max_prompt_length_attempt2: 2560  # attempt1 prompt + full attempt1 output (up to 1024) + self-correction wrapper
+  generation_temperature: 0.6
+  seed: 3407
+
+eval:
+  batch_size: 50                    # dropped 100->50: prior run wedged sshd at batch 100 + gen 840 (likely memory spike)
+  max_examples: 200                 # matches dataset.test_split_size — 200 / 50 = 4 batches
+  generation_temperature: 0.0

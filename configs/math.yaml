@@ -1,0 +1,80 @@
+run_name: score-math
+wandb_project: SCoRe-Math
+
+model:
+  name: unsloth/Qwen3-4B-unsloth-bnb-4bit
+  max_seq_length: 12288           # attempt2 prompt (up to ~6k) + new tokens (4k) + headroom
+  load_in_4bit: true              # noop for the pre-quantized weights, kept for clarity
+  chat_template: ""               # empty = use the tokenizer's built-in template (Qwen3 ships one)
+  fast_inference: true            # use vLLM for generation — 2-3x faster than HF generate()
+  fast_inference_gpu_mem: 0.5     # vLLM GPU memory share (training keeps the rest)
+  lora:
+    r: 16
+    alpha: 16
+    dropout: 0.0
+    target_modules:
+      - q_proj
+      - k_proj
+      - v_proj
+      - o_proj
+      - gate_proj
+      - up_proj
+      - down_proj
+
+dataset:
+  name: Sebasdi/math_final_answer
+  input_field: problem
+  target_field: final_answer_solution
+  test_split_size: 200
+
+prompts:
+  system: |
+    You are an expert math tutor. Solve each problem in two parts:
+
+    1. Wrap all your reasoning in <think>...</think> tags. Work through the
+       problem step by step inside that block.
+    2. After </think>, wrap your final answer in <answer>...</answer> tags.
+       Put only the bare answer between the tags — no surrounding prose, no
+       leading "The answer is".
+
+    Answer-format examples:
+    - <answer>42</answer>
+    - <answer>3.14</answer>
+    - <answer>-2/3</answer>
+    - <answer>y = 2x - 13</answer>
+    - <answer>\boxed{x^2 + 1}</answer>
+
+  self_correction: |
+    There might be an error in the solution above. Review the prior reasoning,
+    identify any mistakes, and rewrite the solution.
+
+    Use the same format: <think>...</think> for your corrected reasoning, then
+    <answer>...</answer> for your final answer.
+
+reward:
+  fn: format_and_match           # 0.25 for <think>, 0.25 for <answer>, 0.5 for correct answer
+  answer_extractor: math_final_answer
+
+train:
+  stage1_batch_size: 8
+  stage2_batch_size: 8           # raised 4→8: K3 KL + selective log-softmax kill the [B,T,V] tensor that previously forced half-batch
+  learning_rate: 5.0e-6
+  stage1_epochs: 1
+  stage2_epochs: 1
+  beta1: 0.01
+  beta2: 0.1
+  alpha: 10.0
+  max_new_tokens_attempt1: 2048   # halved 4096→2048 to make overnight run feasible on Spark
+  max_new_tokens_attempt2: 2048
+  max_prompt_length_attempt1: 2000
+  max_prompt_length_attempt2: 6000   # attempt2 prompt = attempt1 prompt + full attempt1 output (incl. reasoning) + self-correction
+  generation_temperature: 1.0
+  seed: 3407
+
+eval:
+  batch_size: 16                # eval is gradient-free generation only — pad="longest" makes batched eval cheap. raise if mem holds
+  max_examples: 16              # tight scope so the run completes overnight
+  generation_temperature: 0.6   # Qwen3 + greedy = infinite loops in thinking mode; >0 required
+
+output:
+  dir: outputs                  # adapters saved to {dir}/{run_name}/stage{1,2}/

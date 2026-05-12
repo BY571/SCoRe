@@ -1,8 +1,11 @@
 torch
 transformers
 datasets
+unsloth
+peft
+trl
 accelerate
-scikit-learn
-sentence-transformers
-nltk
+bitsandbytes
+pyyaml
 wandb
+tqdm
