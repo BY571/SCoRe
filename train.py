@@ -119,6 +119,7 @@ class TrainConfig:
     max_prompt_length_attempt2: int
     generation_temperature: float
     seed: int
+    checkpoint_every: int = 0    # save LoRA every N optimizer steps within a stage; 0 = end-of-stage only
 
     def __post_init__(self) -> None:
         if self.max_prompt_length_attempt2 < self.max_prompt_length_attempt1:
@@ -526,9 +527,16 @@ def train_stage_1(
     train_dataset: Any,
     cfg: SCoReConfig,
     optimizer: torch.optim.Optimizer,
+    checkpoint_dir: Path | None = None,
 ) -> Any:
-    """Stage I per Eq. 3: PG on log pi(y2) * r(y2), KL anchor on first attempt."""
+    """Stage I per Eq. 3: PG on log pi(y2) * r(y2), KL anchor on first attempt.
+
+    If ``checkpoint_dir`` is provided and ``cfg.train.checkpoint_every > 0``, the
+    LoRA adapter is saved to ``checkpoint_dir / step_{N}/`` every N optimizer
+    steps (cumulative across epochs). The end-of-stage save is the caller's job.
+    """
     train_cfg = cfg.train
+    step_count = 0
     for epoch in range(train_cfg.stage1_epochs):
         loader = train_dataset.iter(batch_size=train_cfg.stage1_batch_size)
         for batch in tqdm(loader, desc=f"Stage 1 epoch {epoch + 1}/{train_cfg.stage1_epochs}"):
@@ -579,6 +587,14 @@ def train_stage_1(
                 train_cfg.max_new_tokens_attempt1, train_cfg.max_new_tokens_attempt2,
             )
 
+            step_count += 1
+            if (
+                checkpoint_dir is not None
+                and train_cfg.checkpoint_every > 0
+                and step_count % train_cfg.checkpoint_every == 0
+            ):
+                save_adapter(model, tokenizer, checkpoint_dir / f"step_{step_count}")
+
     return model
 
 
@@ -591,9 +607,14 @@ def train_stage_2(
     train_dataset: Any,
     cfg: SCoReConfig,
     optimizer: torch.optim.Optimizer,
+    checkpoint_dir: Path | None = None,
 ) -> Any:
-    """Stage II per Eq. 4 + Eq. 5: PG on both attempts with reward shaping bonus on r(y2)."""
+    """Stage II per Eq. 4 + Eq. 5: PG on both attempts with reward shaping bonus on r(y2).
+
+    Mid-stage adapter checkpointing follows the same scheme as ``train_stage_1``.
+    """
     train_cfg = cfg.train
+    step_count = 0
     for epoch in range(train_cfg.stage2_epochs):
         loader = train_dataset.iter(batch_size=train_cfg.stage2_batch_size)
         for batch in tqdm(loader, desc=f"Stage 2 epoch {epoch + 1}/{train_cfg.stage2_epochs}"):
@@ -653,6 +674,14 @@ def train_stage_2(
                 "stage2", batch, roll,
                 train_cfg.max_new_tokens_attempt1, train_cfg.max_new_tokens_attempt2,
             )
+
+            step_count += 1
+            if (
+                checkpoint_dir is not None
+                and train_cfg.checkpoint_every > 0
+                and step_count % train_cfg.checkpoint_every == 0
+            ):
+                save_adapter(model, tokenizer, checkpoint_dir / f"step_{step_count}")
 
     return model
 
@@ -727,7 +756,26 @@ def main() -> None:
         help="Smoke run: limit train to N examples and cap eval.max_examples at N. "
              "Use to verify the loop end-to-end before a full run.",
     )
+    parser.add_argument(
+        "--start-stage",
+        type=int,
+        default=1,
+        choices=[1, 2],
+        help="1 (default): full run, train both stages. "
+             "2: skip stage 1 entirely; requires --resume-adapter pointing at a saved LoRA.",
+    )
+    parser.add_argument(
+        "--resume-adapter",
+        type=str,
+        default=None,
+        help="Path to a saved LoRA adapter directory (output of save_adapter). "
+             "Loaded into the 'default' adapter slot after model init. "
+             "Required when --start-stage 2.",
+    )
     args = parser.parse_args()
+
+    if args.start_stage == 2 and args.resume_adapter is None:
+        parser.error("--resume-adapter PATH is required when --start-stage 2")
 
     cfg = load_config(args.config)
     random.seed(cfg.train.seed)
@@ -738,6 +786,15 @@ def main() -> None:
     wandb.init(project=cfg.wandb_project, name=cfg.run_name, config=_flatten(cfg))
 
     model, tokenizer = load_model_and_tokenizer(cfg.model)
+
+    if args.resume_adapter is not None:
+        adapter_path = Path(args.resume_adapter)
+        if not adapter_path.exists():
+            raise FileNotFoundError(f"--resume-adapter path does not exist: {adapter_path}")
+        print(f"Loading adapter weights from {adapter_path} into 'default' slot")
+        # Overwrites the freshly-initialized LoRA from get_peft_model with saved weights.
+        model.load_adapter(str(adapter_path), adapter_name="default", is_trainable=True)
+
     train_dataset, test_dataset = load_and_prepare_data(cfg.dataset, cfg.prompts, tokenizer)
 
     if args.smoke > 0:
@@ -756,13 +813,25 @@ def main() -> None:
 
     out_root = Path(cfg.output.dir) / cfg.run_name
 
+    # Pretrain eval = eval before any training in *this run*. If resuming from a
+    # stage-1 adapter, this reflects the loaded checkpoint's accuracy, which is
+    # the right baseline to compare stage 2's effect against.
     wandb.log({f"eval_pretrain/{k}": v for k, v in evaluate(model, tokenizer, test_dataset, cfg).items()})
 
-    model = train_stage_1(model, tokenizer, train_dataset, cfg, optimizer)
-    wandb.log({f"eval_after_stage1/{k}": v for k, v in evaluate(model, tokenizer, test_dataset, cfg).items()})
-    save_adapter(model, tokenizer, out_root / "stage1")
+    if args.start_stage <= 1:
+        model = train_stage_1(
+            model, tokenizer, train_dataset, cfg, optimizer,
+            checkpoint_dir=out_root / "stage1",
+        )
+        wandb.log({f"eval_after_stage1/{k}": v for k, v in evaluate(model, tokenizer, test_dataset, cfg).items()})
+        save_adapter(model, tokenizer, out_root / "stage1")
+    else:
+        print("Skipping stage 1 (--start-stage 2)")
 
-    model = train_stage_2(model, tokenizer, train_dataset, cfg, optimizer)
+    model = train_stage_2(
+        model, tokenizer, train_dataset, cfg, optimizer,
+        checkpoint_dir=out_root / "stage2",
+    )
     wandb.log({f"eval_after_stage2/{k}": v for k, v in evaluate(model, tokenizer, test_dataset, cfg).items()})
     save_adapter(model, tokenizer, out_root / "stage2")
 

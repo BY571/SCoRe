@@ -31,9 +31,13 @@ python train.py --config configs/gsm8k.yaml
 
 # 1-minute end-to-end smoke (N examples, capped eval)
 python train.py --config configs/gsm8k.yaml --smoke 8
+
+# skip stage 1 and resume stage 2 from a saved stage-1 adapter
+python train.py --config configs/gsm8k.yaml \
+    --start-stage 2 --resume-adapter outputs/score-gsm8k/stage1/step_200
 ```
 
-Logs go to W&B (`wandb_project` in the config). LoRA adapters save to `outputs/{run_name}/stage{1,2}/`.
+Logs go to W&B (`wandb_project` in the config). End-of-stage adapters save to `outputs/{run_name}/stage{1,2}/`. Set `train.checkpoint_every: N` in the YAML to also save mid-stage to `outputs/{run_name}/stage{1,2}/step_N/` every N optimizer steps — useful for resuming or for picking the best checkpoint by reward curve.
 
 ## Adapt to a new task
 
