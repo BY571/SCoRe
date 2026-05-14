@@ -120,12 +120,20 @@ class TrainConfig:
     generation_temperature: float
     seed: int
     checkpoint_every: int = 0    # save LoRA every N optimizer steps within a stage; 0 = end-of-stage only
+    length_norm: str = "sequence"   # PG/KL length normalization. "sequence": divide by actual
+                                    # generated length (per-sample mean — original). "constant":
+                                    # divide by max_new_tokens (Dr.GRPO — avoids the length bias
+                                    # where the policy games per-token gradient by inflating length).
 
     def __post_init__(self) -> None:
         if self.max_prompt_length_attempt2 < self.max_prompt_length_attempt1:
             raise ValueError(
                 "max_prompt_length_attempt2 must be >= max_prompt_length_attempt1 "
                 "(attempt 2 prompt = attempt 1 prompt + answer + self-correction)"
+            )
+        if self.length_norm not in ("sequence", "constant"):
+            raise ValueError(
+                f"length_norm must be 'sequence' or 'constant', got {self.length_norm!r}"
             )
 
 
@@ -312,20 +320,45 @@ def get_eos_mask(answer_ids: Tensor, tokenizer: Any) -> Tensor:
     return (torch.cumsum(is_eos, dim=1) <= 1).int()
 
 
-def get_kl_div(ref_log_probs: Tensor, policy_log_probs: Tensor, mask: Tensor) -> Tensor:
-    """K3 KL estimator (Schulman): unbiased ``E[D_KL(π || π_ref)]`` from per-token log-probs only.
+def _length_normalize(per_token: Tensor, mask: Tensor, mode: str, max_new: int) -> Tensor:
+    """Reduce a per-token ``[B, gen_len]`` quantity to per-sample ``[B]`` by summing
+    over the masked span, then normalizing per ``mode``:
 
-    ``K3 = exp(log π_ref - log π) - (log π_ref - log π) - 1``. Always ≥ 0, equals 0 when
-    distributions match, and is unbiased for the forward KL. Crucially, it requires
-    ONLY the per-token log-probabilities of sampled tokens — no full vocab distribution,
-    so we never materialize a ``[B, T, V]`` tensor.
+      - ``"sequence"``: divide by the actual masked length (per-sample mean). The
+        original form — but it lets the policy game per-token gradient weight by
+        inflating generation length.
+      - ``"constant"``: divide by ``max_new`` (the generation cap). Dr.GRPO fix —
+        per-token weight is fixed across samples regardless of rollout length.
+
+    For SCoRe's two-attempt structure, ``max_new`` is the *per-attempt* cap
+    (``max_new_tokens_attempt{1,2}``). When both caps are equal this is exactly
+    vanilla Dr.GRPO; if they differ, each attempt's tokens are normalized by that
+    attempt's own budget.
+    """
+    summed = (per_token * mask).sum(-1)
+    if mode == "constant":
+        return summed / max_new
+    return summed / mask.sum(-1).clamp(min=1)
+
+
+def get_kl_div(
+    ref_log_probs: Tensor,
+    policy_log_probs: Tensor,
+    mask: Tensor,
+    mode: str,
+    max_new: int,
+) -> Tensor:
+    """K3 KL estimator (Schulman), length-normalized per ``mode`` (see ``_length_normalize``).
+
+    ``K3 = exp(log π_ref - log π) - (log π_ref - log π) - 1``. Always ≥ 0, unbiased
+    forward KL. Requires only per-token log-probs of sampled tokens — no ``[B, T, V]``.
 
     Both inputs are shape ``[B, gen_len]``. ``ref_log_probs`` is from the disabled-adapter
     forward (no grad); ``policy_log_probs`` carries the gradient.
     """
     diff = ref_log_probs - policy_log_probs
     kl_per_token = torch.exp(diff) - diff - 1
-    return (kl_per_token * mask).sum(-1) / mask.sum(-1).clamp(min=1)
+    return _length_normalize(kl_per_token, mask, mode, max_new)
 
 
 # --- Rollout -----------------------------------------------------------------
@@ -444,8 +477,10 @@ def two_attempt_rollout(
     )
 
 
-def _masked_mean_logp(log_probs: Tensor, mask: Tensor) -> Tensor:
-    return (log_probs * mask).sum(-1) / mask.sum(-1).clamp(min=1)
+def _masked_norm_logp(log_probs: Tensor, mask: Tensor, mode: str, max_new: int) -> Tensor:
+    """Per-sample log-prob of the generated span, length-normalized per ``mode``
+    (see ``_length_normalize``). Used to weight the policy-gradient term."""
+    return _length_normalize(log_probs, mask, mode, max_new)
 
 
 def _log_rollouts_table(
@@ -555,11 +590,19 @@ def train_stage_1(
                     base_logp_a1 = get_log_probs(model, action1, roll.x1_len)
 
                 logp_a1 = get_log_probs(model, action1, roll.x1_len)
-                kl_div = get_kl_div(base_logp_a1, logp_a1, roll.attempt1_answer_mask)
+                kl_div = get_kl_div(
+                    base_logp_a1, logp_a1, roll.attempt1_answer_mask,
+                    mode=train_cfg.length_norm,
+                    max_new=train_cfg.max_new_tokens_attempt1,
+                )
 
                 logp_a2 = get_log_probs(model, action2, roll.x2_len)
                 reward2_t = torch.tensor(roll.reward2, device=model.device, dtype=logp_a2.dtype)
-                pg_term = _masked_mean_logp(logp_a2, roll.attempt2_answer_mask) * reward2_t
+                pg_term = _masked_norm_logp(
+                    logp_a2, roll.attempt2_answer_mask,
+                    mode=train_cfg.length_norm,
+                    max_new=train_cfg.max_new_tokens_attempt2,
+                ) * reward2_t
 
                 loss = (-pg_term + train_cfg.beta2 * kl_div).mean()
 
@@ -632,17 +675,33 @@ def train_stage_2(
                 with torch.no_grad(), model.disable_adapter():
                     base_logp_a1 = get_log_probs(model, action1, roll.x1_len)
                 logp_a1 = get_log_probs(model, action1, roll.x1_len)
-                kl_1 = get_kl_div(base_logp_a1, logp_a1, roll.attempt1_answer_mask)
+                kl_1 = get_kl_div(
+                    base_logp_a1, logp_a1, roll.attempt1_answer_mask,
+                    mode=train_cfg.length_norm,
+                    max_new=train_cfg.max_new_tokens_attempt1,
+                )
                 reward1_t = torch.tensor(roll.reward1, device=model.device, dtype=logp_a1.dtype)
-                pg_attempt1 = _masked_mean_logp(logp_a1, roll.attempt1_answer_mask) * reward1_t
+                pg_attempt1 = _masked_norm_logp(
+                    logp_a1, roll.attempt1_answer_mask,
+                    mode=train_cfg.length_norm,
+                    max_new=train_cfg.max_new_tokens_attempt1,
+                ) * reward1_t
 
                 with torch.no_grad(), model.disable_adapter():
                     base_logp_a2 = get_log_probs(model, action2, roll.x2_len)
                 logp_a2 = get_log_probs(model, action2, roll.x2_len)
-                kl_2 = get_kl_div(base_logp_a2, logp_a2, roll.attempt2_answer_mask)
+                kl_2 = get_kl_div(
+                    base_logp_a2, logp_a2, roll.attempt2_answer_mask,
+                    mode=train_cfg.length_norm,
+                    max_new=train_cfg.max_new_tokens_attempt2,
+                )
                 reward2_t = torch.tensor(roll.reward2, device=model.device, dtype=logp_a2.dtype)
                 shaped_reward2 = reward2_t + train_cfg.alpha * (reward2_t - reward1_t)
-                pg_attempt2 = _masked_mean_logp(logp_a2, roll.attempt2_answer_mask) * shaped_reward2
+                pg_attempt2 = _masked_norm_logp(
+                    logp_a2, roll.attempt2_answer_mask,
+                    mode=train_cfg.length_norm,
+                    max_new=train_cfg.max_new_tokens_attempt2,
+                ) * shaped_reward2
 
                 loss = (
                     -pg_attempt1 - pg_attempt2
