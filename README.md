@@ -32,6 +32,9 @@ pip install -r requirements.txt
 # full run
 python train.py --config configs/gsm8k.yaml
 
+# fast toy task (~1h two-stage run) — good for debugging the loop end-to-end
+python train.py --config configs/arithmetic.yaml
+
 # 1-minute end-to-end smoke (N examples, capped eval)
 python train.py --config configs/gsm8k.yaml --smoke 8
 
@@ -41,6 +44,8 @@ python train.py --config configs/gsm8k.yaml \
 ```
 
 Logs go to W&B (`wandb_project` in the config). End-of-stage adapters save to `outputs/{run_name}/stage{1,2}/`. Set `train.checkpoint_every: N` in the YAML to also save mid-stage to `outputs/{run_name}/stage{1,2}/step_N/` every N optimizer steps — useful for resuming or for picking the best checkpoint by reward curve.
+
+`configs/arithmetic.yaml` uses [`torchtrade/arithmetic-hard-qwen3-0.6b`](https://huggingface.co/datasets/torchtrade/arithmetic-hard-qwen3-0.6b) — 200 train / 50 eval 5-digit subtractions that Qwen3-0.6B fails greedy-decoded (built by `build_hard_arithmetic.py`; see the dataset card for source + method). It's a debug/shake-out task, not a benchmark: difficulty is defined relative to that one model, so a full two-stage run finishes in ~1h and stresses every part of the loop.
 
 ## Adapt to a new task
 
