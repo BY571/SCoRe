@@ -88,12 +88,17 @@ def _has_one_answer_tag(text: str) -> bool:
 def format_and_match(
     predictions: list[str], targets: list[str], extractor: AnswerExtractor
 ) -> list[float]:
-    """Compound reward: tag format compliance + answer correctness.
+    """Compound reward: loose tag format compliance + answer correctness.
 
     Per prediction:
       - 0.25 for a balanced ``<think>...</think>`` pair (reasoning closed).
       - 0.25 for exactly one balanced ``<answer>...</answer>`` pair.
       - 0.50 for the extracted answer matching the target after normalization.
+
+    "Loose": the tags only need to appear *somewhere* — arbitrary prose is
+    tolerated before, between, and after the two blocks. For a version that
+    requires the whole output to be exactly the two blocks, see
+    ``strict_format_and_match``.
 
     Returns floats in [0.0, 1.0]. Format checks apply to predictions only;
     targets may not follow the same format conventions (e.g. dataset
@@ -106,6 +111,63 @@ def format_and_match(
             r += 0.25
         if _has_one_answer_tag(pred):
             r += 0.25
+        if _normalize(extractor(pred)) == _normalize(extractor(target)):
+            r += 0.5
+        rewards.append(r)
+    return rewards
+
+
+_STRICT_FORMAT = re.compile(
+    r"^\s*<think>(.*?)</think>\s*<answer>(.*?)</answer>\s*$",
+    flags=re.DOTALL,
+)
+
+
+def _has_strict_format(text: str) -> bool:
+    """The ENTIRE output is exactly ``<think>...</think><answer>...</answer>``.
+
+    Only whitespace is permitted before ``<think>``, between ``</think>`` and
+    ``<answer>``, and after ``</answer>`` — no prose anywhere outside the two
+    blocks, and exactly one of each tag.
+
+    The ``.count()`` guards are not redundant with the regex: ``.*?`` with
+    ``DOTALL`` backtracks across a second ``<think>`` block to reach a later
+    ``</think>``, so a pure regex would accept duplicated blocks. Counting
+    tags first rejects those; the regex then enforces ordering + no-prose.
+    """
+    if text.count("<think>") != 1 or text.count("</think>") != 1:
+        return False
+    if text.count("<answer>") != 1 or text.count("</answer>") != 1:
+        return False
+    return _STRICT_FORMAT.match(text) is not None
+
+
+@register_reward("strict_format_and_match")
+def strict_format_and_match(
+    predictions: list[str], targets: list[str], extractor: AnswerExtractor
+) -> list[float]:
+    """Stricter compound reward: whole-output format compliance + answer correctness.
+
+    Per prediction:
+      - 0.50 for STRICT format: the entire output is exactly one
+        ``<think>...</think>`` block immediately followed by exactly one
+        ``<answer>...</answer>`` block, with only whitespace before, between,
+        and after. All-or-nothing.
+      - 0.50 for the extracted answer matching the target after normalization.
+
+    Contrast with ``format_and_match``, which splits the format reward into
+    two loose 0.25 checks (tags exist *somewhere*) and tolerates arbitrary
+    prose around and between the blocks. Select this via ``reward.fn`` in the
+    YAML when you want the model to learn the exact output shape — no prose
+    leaking between ``</think>`` and ``<answer>``, nothing after ``</answer>``.
+
+    Returns floats in [0.0, 1.0].
+    """
+    rewards: list[float] = []
+    for pred, target in zip(predictions, targets):
+        r = 0.0
+        if _has_strict_format(pred):
+            r += 0.5
         if _normalize(extractor(pred)) == _normalize(extractor(target)):
             r += 0.5
         rewards.append(r)
