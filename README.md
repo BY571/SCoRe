@@ -6,7 +6,7 @@ Core algorithm is as in the paper: Stage I anchors attempt 1 to the reference po
 
 - **Reasoning-tag format from [DeepSeek-R1](https://arxiv.org/abs/2501.12948)** (the GRPO paper): model reasons inside `<think>...</think>` and gives the final answer inside `<answer>...</answer>`. The compound reward below scores this format directly.
 - **K3 KL estimator** (Schulman): `K3 = exp(log π_ref − log π) − (log π_ref − log π) − 1`. Unbiased forward KL from per-token log-probs only — no `[B, T, V]` log-softmax tensor, which is what makes Stage II's two-graph backward fit in memory.
-- **Compound reward** (`format_and_match`): 0.25 for a `<think>...</think>` pair, 0.25 for one `<answer>...</answer>` pair, 0.5 for extracted-answer match. Gives the α-bonus more signal than pure binary and explicitly anchors format.
+- **Compound reward** (`format_and_match`): 0.25 for a `<think>...</think>` pair, 0.25 for one `<answer>...</answer>` pair, 0.5 for extracted-answer match. Gives the α-bonus more signal than pure binary and explicitly anchors format. A stricter `strict_format_and_match` variant (0.5 format / 0.5 match) requires the *whole* output to be exactly the two blocks — no prose between `</think>` and `<answer>`, nothing after `</answer>`. Select either via `reward.fn` in the YAML.
 - **LoRA-only**: reference policy = same model with `model.disable_adapter()`. No second model in VRAM.
 
 ## Layout
