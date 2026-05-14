@@ -39,18 +39,6 @@ python train.py --config configs/gsm8k.yaml \
 
 Logs go to W&B (`wandb_project` in the config). End-of-stage adapters save to `outputs/{run_name}/stage{1,2}/`. Set `train.checkpoint_every: N` in the YAML to also save mid-stage to `outputs/{run_name}/stage{1,2}/step_N/` every N optimizer steps — useful for resuming or for picking the best checkpoint by reward curve.
 
-## Selecting the reward
-
-The reward function and answer extractor are chosen by name in the YAML — `train.py` looks them up from the `reward_function.py` registries:
-
-```yaml
-reward:
-  fn: strict_format_and_match    # or: format_and_match, exact_match
-  answer_extractor: gsm8k_hash   # or: math_final_answer, identity
-```
-
-Shipped reward functions: `format_and_match` (loose tag check), `strict_format_and_match` (whole-output must be exactly the two blocks), `exact_match` (extracted-answer equality only).
-
 ## Adapt to a new task
 
 1. Push your dataset to the HF Hub with `train` and `test` splits. For datasets needing a sub-config (e.g. `openai/gsm8k` has `main`/`socratic`), set `dataset.config_name`.

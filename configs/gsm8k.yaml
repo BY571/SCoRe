@@ -44,7 +44,9 @@ prompts:
     the final answer with <answer>...</answer>.
 
 reward:
-  fn: format_and_match              # 0.25 <think> + 0.25 <answer> + 0.5 correct number
+  fn: format_and_match              # 0.25 <think> + 0.25 <answer> + 0.5 correct number.
+                                    # use `strict_format_and_match` for whole-output format
+                                    # compliance (no prose outside the two blocks); 0.5 / 0.5 split.
   answer_extractor: gsm8k_hash
 
 train:
