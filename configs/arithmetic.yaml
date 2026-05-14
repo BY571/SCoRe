@@ -82,6 +82,8 @@ train:
   generation_temperature: 0.6       # Qwen3 thinking mode: >0 required
   seed: 3407
   length_norm: sequence             # "constant" for the Dr.GRPO length-bias fix (see gsm8k.yaml)
+  checkpoint_every: 15              # ~56 steps/stage -> saves at 15/30/45 + end-of-stage = 4/stage.
+                                    # exercises the mid-stage checkpoint feature on this toy run.
 
 eval:
   batch_size: 50
