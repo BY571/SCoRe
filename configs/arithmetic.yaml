@@ -1,0 +1,84 @@
+run_name: score-arithmetic
+wandb_project: SCoRe-Arithmetic
+
+# Fast toy task: 5-digit subtraction questions that Qwen3-0.6B CANNOT solve.
+# Built by greedy-decoding 700 EleutherAI/arithmetic 5ds problems with this
+# model and keeping the ~48% it gets wrong (see build_hard_arithmetic.py),
+# then taking 200 train / 50 eval. Because every example is a known failure,
+# attempt-1 accuracy starts near 0% — maximal room for self-correction, and
+# the format reward (0.25+0.25) carries the early gradient signal.
+#
+# Tiny + fast: 200 train at batch 16 = ~13 steps/stage (vs gsm8k's 269),
+# eval is a single batch of 50. A full two-stage run is well under an hour
+# of training. Use it to shake out the loop / new features before spending
+# Spark wallclock on a real task.
+
+model:
+  name: Qwen/Qwen3-0.6B
+  max_seq_length: 2048              # prompt (~150) + 2x gen (768) + headroom
+  load_in_4bit: false
+  chat_template: ""                 # empty = tokenizer's built-in
+  fast_inference: false
+  fast_inference_gpu_mem: 0.5
+  lora:
+    r: 16
+    alpha: 16
+    dropout: 0.0
+    target_modules:
+      - q_proj
+      - k_proj
+      - v_proj
+      - o_proj
+      - gate_proj
+      - up_proj
+      - down_proj
+
+dataset:
+  name: torchtrade/arithmetic-hard-qwen3-0.6b   # curated: 5-digit subtractions Qwen3-0.6B fails
+  input_field: question             # clean text, e.g. "What is 70641 minus 71101?"
+  target_field: answer              # bare number, e.g. "-460" — gsm8k_hash extracts it
+  test_split_size: 50               # dataset ships train(200)/test(50); all 50 test -> held-out eval
+
+prompts:
+  system: |
+    You are an arithmetic solver. Output EXACTLY this format and nothing else:
+    <think>
+    a brief calculation — just the arithmetic steps, no commentary
+    </think>
+    <answer>the final number</answer>
+    Keep the reasoning short. Put only the bare number between the answer tags.
+
+  self_correction: |
+    There might be an error in the solution above. Re-check the arithmetic and
+    the format. Identify any mistake and rewrite the solution.
+
+    Use the same format: <think>...</think> for your corrected reasoning, then
+    <answer>...</answer> for the final number.
+
+reward:
+  fn: format_and_match              # 0.25 <think> + 0.25 <answer> + 0.5 correct number.
+  answer_extractor: gsm8k_hash      # pulls the number from <answer>N</answer> or bare target
+
+train:
+  stage1_batch_size: 16             # 200 train -> ~13 steps/stage. batch 16 not 32: same total
+  stage2_batch_size: 16             # generation wallclock per epoch but 2x the optimizer steps.
+  learning_rate: 2.0e-5
+  stage1_epochs: 1
+  stage2_epochs: 1
+  beta1: 0.01
+  beta2: 0.1
+  alpha: 10.0
+  max_new_tokens_attempt1: 768      # Qwen3-0.6B thinking mode rambles ~400-500 tokens even on
+  max_new_tokens_attempt2: 768      # simple arithmetic; 768 keeps most rollouts from truncating
+  max_prompt_length_attempt1: 384   # system prompt + short expression
+  max_prompt_length_attempt2: 1024  # attempt1 prompt + attempt1 output (up to 768) + self-correction
+  generation_temperature: 0.6       # Qwen3 thinking mode: >0 required
+  seed: 3407
+  length_norm: sequence             # "constant" for the Dr.GRPO length-bias fix (see gsm8k.yaml)
+  checkpoint_every: 4               # ~13 steps/stage -> saves at 4/8/12 + end-of-stage = 4/stage.
+                                    # exercises the mid-stage checkpoint feature on this toy run.
+
+eval:
+  batch_size: 50
+  max_examples: 50                  # one batch of 50 — the dataset's full test split
+  generation_temperature: 0.0
