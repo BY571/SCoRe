@@ -13,11 +13,12 @@ Core algorithm is as in the paper: Stage I anchors attempt 1 to the reference po
 ## Layout
 
 ```
-train.py              # task-agnostic entry point
-reward_function.py    # @register_reward / @register_extractor + shipped fns
-configs/gsm8k.yaml    # primary target
-configs/math.yaml     # math baseline
-profile_run.py        # optional length/extraction diagnostic
+train.py                 # task-agnostic entry point
+reward_function.py       # @register_reward / @register_extractor + shipped fns
+configs/gsm8k.yaml       # primary target
+configs/arithmetic.yaml  # fast toy task (single-digit composite arithmetic) — full run in a few hours
+configs/math.yaml        # math baseline
+profile_run.py           # optional length/extraction diagnostic
 ```
 
 `train.py` never references a specific task — model, dataset, prompts, reward, and extractor are all YAML.

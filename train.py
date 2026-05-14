@@ -77,6 +77,11 @@ class DatasetConfig:
     target_field: str
     test_split_size: int
     config_name: str | None = None    # for HF datasets that require a sub-config (e.g. openai/gsm8k "main")
+    split: str | None = None          # if set, load just this one split spec (slicing allowed, e.g.
+                                      # "validation[:2000]") and partition it into train + held-out
+                                      # eval. None = expect separate "train" and "test" splits.
+    revision: str | None = None       # HF dataset revision — e.g. "refs/convert/parquet" to use the
+                                      # auto-generated parquet export of a legacy script dataset.
 
 
 @dataclass
@@ -231,27 +236,44 @@ def load_and_prepare_data(
 ) -> tuple[Any, Any]:
     """Load dataset and pre-build chat-templated prompts.
 
-    The test split is partitioned: the first `test_split_size` examples become the
-    held-out eval set; the remainder is concatenated into train so that little of
-    the available data is wasted on eval. Each output example carries:
+    Two loading modes, picked by ``dataset_cfg.split``:
+
+      - ``split is None`` (default): expects separate ``train`` and ``test``
+        splits. The first ``test_split_size`` test examples become the held-out
+        eval set; the rest is concatenated into train so little data is wasted.
+      - ``split`` set: a single-split dataset (slicing allowed, e.g.
+        ``"validation[:2000]"``). The first ``test_split_size`` examples become
+        the held-out eval set; the remainder is train.
+
+    Each output example carries:
       - text:     fully chat-templated prompt string ready for tokenization
       - target:   raw ground-truth string from `target_field`
       - messages: the messages list, used to append assistant + self-correction
     """
-    dataset = load_dataset(dataset_cfg.name, name=dataset_cfg.config_name, split="train")
-    test_dataset = load_dataset(dataset_cfg.name, name=dataset_cfg.config_name, split="test")
-    if dataset_cfg.test_split_size > len(test_dataset):
-        raise ValueError(
-            f"test_split_size={dataset_cfg.test_split_size} exceeds "
-            f"test set size {len(test_dataset)}"
+    load_kw = {"name": dataset_cfg.config_name, "revision": dataset_cfg.revision}
+    if dataset_cfg.split is not None:
+        full = load_dataset(dataset_cfg.name, split=dataset_cfg.split, **load_kw)
+        if dataset_cfg.test_split_size >= len(full):
+            raise ValueError(
+                f"test_split_size={dataset_cfg.test_split_size} must be < "
+                f"single-split dataset size {len(full)}"
+            )
+        train_dataset = full.select(range(dataset_cfg.test_split_size, len(full)))
+        test_dataset = full.select(range(dataset_cfg.test_split_size))
+    else:
+        dataset = load_dataset(dataset_cfg.name, split="train", **load_kw)
+        test_dataset = load_dataset(dataset_cfg.name, split="test", **load_kw)
+        if dataset_cfg.test_split_size > len(test_dataset):
+            raise ValueError(
+                f"test_split_size={dataset_cfg.test_split_size} exceeds "
+                f"test set size {len(test_dataset)}"
+            )
+        held_out = test_dataset.select(range(dataset_cfg.test_split_size))
+        extra_train = test_dataset.select(
+            range(dataset_cfg.test_split_size, len(test_dataset))
         )
-
-    held_out = test_dataset.select(range(dataset_cfg.test_split_size))
-    extra_train = test_dataset.select(
-        range(dataset_cfg.test_split_size, len(test_dataset))
-    )
-    train_dataset = concatenate_datasets([dataset, extra_train])
-    test_dataset = held_out
+        train_dataset = concatenate_datasets([dataset, extra_train])
+        test_dataset = held_out
 
     def build(examples: dict[str, list]) -> dict[str, list]:
         messages = [
