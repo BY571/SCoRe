@@ -47,6 +47,18 @@ Logs go to W&B (`wandb_project` in the config). End-of-stage adapters save to `o
 
 `configs/arithmetic.yaml` uses [`torchtrade/arithmetic-hard-qwen3-0.6b`](https://huggingface.co/datasets/torchtrade/arithmetic-hard-qwen3-0.6b) — 200 train / 50 eval 5-digit subtractions that Qwen3-0.6B fails greedy-decoded (built by `build_hard_arithmetic.py`; see the dataset card for source + method). It's a debug/shake-out task, not a benchmark: difficulty is defined relative to that one model, so a full two-stage run finishes in ~1h and stresses every part of the loop.
 
+## Toy-task results
+
+One full two-stage run of `configs/arithmetic.yaml` (Qwen3-0.6B, 50-example held-out eval):
+
+| checkpoint     | acc attempt 1 | acc attempt 2 | Δ (attempt 2 − attempt 1) |
+|----------------|--------------:|--------------:|--------------------------:|
+| pretrain       |          0.42 |          0.51 |                     +0.09 |
+| after Stage I  |          0.57 |          0.65 |                     +0.08 |
+| after Stage II |          0.71 |         0.735 |                    +0.025 |
+
+Total accuracy climbs steadily through both stages — **+29 pts on attempt 1** (0.42 → 0.71) and **+22.5 pts on attempt 2** (0.51 → 0.735). The held-out Δ narrows as attempt 1 itself gets strong (less left to correct), but the self-correction signal shows up clearly in the *training* rollouts: the attempt-2-minus-attempt-1 reward gap flips from **−0.38 in Stage I to +0.25 in Stage II** once the `α · (r(y2) − r(y1))` bonus kicks in — Stage II is what turns a worse second attempt into a better one.
+
 ## Adapt to a new task
 
 1. Push your dataset to the HF Hub with `train` and `test` splits. For datasets needing a sub-config (e.g. `openai/gsm8k` has `main`/`socratic`), set `dataset.config_name`.
