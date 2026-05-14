@@ -1,16 +1,23 @@
 run_name: score-arithmetic
 wandb_project: SCoRe-Arithmetic
 
-# Toy task: single-digit composite arithmetic, e.g. "(9 + 8) * 2 = 34".
-# Two operations (needs order-of-operations + 2 arithmetic steps) but tiny
-# operands, so reasoning is ~20 tokens and the answer is ~1-3 chars. ~10x
-# shorter generation than gsm8k -> a full two-stage run finishes in a few
-# hours instead of days. Use it to validate the training loop / new features
-# before committing Spark wallclock to a real task.
+# Toy task: 5-digit addition, e.g. "65360 + 16204 = 81564". Subset picked by
+# probing Qwen3-0.6B across all EleutherAI/arithmetic subsets at this exact
+# config — 5da lands ~68% attempt-1 accuracy, the SCoRe Goldilocks zone
+# (1-4 digit arithmetic measured 74-92% = too easy; 5-digit subtraction was
+# ~48% but with 42% truncation = poisoned signal). 1800 train / 200 eval at
+# batch 32 = ~56 steps/stage (vs gsm8k's 269), and generation averages ~410
+# tokens (vs gsm8k's ~840) — a full two-stage run is a few hours, not days.
+# Use it to shake out the training loop / new features before spending
+# Spark wallclock on a real task.
+#
+# At this config the probe measured ~88% format compliance and ~12%
+# truncation pre-training — both should improve under the format reward +
+# length tracking, and watching them do so validates those features.
 
 model:
   name: Qwen/Qwen3-0.6B
-  max_seq_length: 1024              # tiny task: prompt (~150) + 2x gen (256) + headroom
+  max_seq_length: 2048              # prompt (~150) + 2x gen (768) + headroom
   load_in_4bit: false
   chat_template: ""                 # empty = tokenizer's built-in
   fast_inference: false
@@ -33,25 +40,27 @@ dataset:
   config_name: default              # the parquet export collapses all 10 subsets into one config
   revision: refs/convert/parquet    # EleutherAI/arithmetic ships a legacy dataset script; the
                                     # auto-generated parquet export is the loadable form
-  split: validation[:2000]          # rows 0-1999 of the export are the arithmetic_1dc subset
-                                    # (single-digit composite); single split -> partitioned below
-  input_field: context              # e.g. "Question: What is (9 + 8) * 2?\nAnswer:"
-  target_field: completion          # bare number, e.g. " 34" — gsm8k_hash strips + extracts
+  split: validation[16000:18000]    # rows 16000-17999 of the export are the arithmetic_5da subset
+                                    # (5-digit addition); single split -> partitioned below
+  input_field: context              # e.g. "Question: What is 65360 plus 16204?\nAnswer:"
+  target_field: completion          # bare number, e.g. " 81564" — gsm8k_hash strips + extracts
   test_split_size: 200              # 200 held out for eval, remaining 1800 -> train
 
 prompts:
   system: |
-    You are a careful arithmetic tutor. Solve the expression step by step.
-    Wrap all your reasoning in <think>...</think> tags — show each operation.
-    After </think>, wrap the final answer in <answer>...</answer> tags.
-    Put only the bare number between the tags — no words, just the number.
+    You are an arithmetic solver. Output EXACTLY this format and nothing else:
+    <think>
+    a brief calculation — just the arithmetic steps, no commentary
+    </think>
+    <answer>the final number</answer>
+    Keep the reasoning short. Put only the bare number between the answer tags.
 
   self_correction: |
-    There might be an error in the solution above. Review the prior reasoning
-    and the answer (and the format). Identify any mistake and rewrite the solution.
+    There might be an error in the solution above. Re-check the arithmetic and
+    the format. Identify any mistake and rewrite the solution.
 
     Use the same format: <think>...</think> for your corrected reasoning, then
-    <answer>...</answer> for the final answer.
+    <answer>...</answer> for the final number.
 
 reward:
   fn: format_and_match              # 0.25 <think> + 0.25 <answer> + 0.5 correct number.
@@ -66,10 +75,10 @@ train:
   beta1: 0.01
   beta2: 0.1
   alpha: 10.0
-  max_new_tokens_attempt1: 256      # reasoning for (a op b) op c is ~20 tokens; 256 is generous
-  max_new_tokens_attempt2: 256
+  max_new_tokens_attempt1: 768      # Qwen3-0.6B thinking mode rambles ~400-500 tokens even on
+  max_new_tokens_attempt2: 768      # simple arithmetic; 768 keeps most rollouts from truncating
   max_prompt_length_attempt1: 384   # system prompt + short expression
-  max_prompt_length_attempt2: 768   # attempt1 prompt + attempt1 output (up to 256) + self-correction
+  max_prompt_length_attempt2: 1024  # attempt1 prompt + attempt1 output (up to 768) + self-correction
   generation_temperature: 0.6       # Qwen3 thinking mode: >0 required
   seed: 3407
   length_norm: sequence             # "constant" for the Dr.GRPO length-bias fix (see gsm8k.yaml)
