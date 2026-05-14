@@ -64,6 +64,9 @@ train:
   max_prompt_length_attempt2: 2560  # attempt1 prompt + full attempt1 output (up to 1024) + self-correction wrapper
   generation_temperature: 0.6
   seed: 3407
+  length_norm: sequence             # "sequence" (default) = divide PG/KL by actual gen length (original).
+                                    # "constant" = divide by max_new_tokens (Dr.GRPO — opt-in fix for the
+                                    # length bias where the policy inflates generation to dilute the loss).
 
 eval:
   batch_size: 50                    # dropped 100->50: prior run wedged sshd at batch 100 + gen 840 (likely memory spike)
