@@ -16,8 +16,9 @@ Core algorithm is as in the paper: Stage I anchors attempt 1 to the reference po
 train.py                 # task-agnostic entry point
 reward_function.py       # @register_reward / @register_extractor + shipped fns
 configs/gsm8k.yaml       # primary target
-configs/arithmetic.yaml  # fast toy task (single-digit composite arithmetic) — full run in a few hours
+configs/arithmetic.yaml  # fast toy task — 5-digit subtraction Qwen3-0.6B can't solve; full run < 1h
 configs/math.yaml        # math baseline
+build_hard_arithmetic.py # builds the toy-task dataset (greedy-decode, keep the failures)
 profile_run.py           # optional length/extraction diagnostic
 ```
 

@@ -1,19 +1,17 @@
 run_name: score-arithmetic
 wandb_project: SCoRe-Arithmetic
 
-# Toy task: 5-digit addition, e.g. "65360 + 16204 = 81564". Subset picked by
-# probing Qwen3-0.6B across all EleutherAI/arithmetic subsets at this exact
-# config — 5da lands ~68% attempt-1 accuracy, the SCoRe Goldilocks zone
-# (1-4 digit arithmetic measured 74-92% = too easy; 5-digit subtraction was
-# ~48% but with 42% truncation = poisoned signal). 1800 train / 200 eval at
-# batch 32 = ~56 steps/stage (vs gsm8k's 269), and generation averages ~410
-# tokens (vs gsm8k's ~840) — a full two-stage run is a few hours, not days.
-# Use it to shake out the training loop / new features before spending
-# Spark wallclock on a real task.
+# Fast toy task: 5-digit subtraction questions that Qwen3-0.6B CANNOT solve.
+# Built by greedy-decoding 700 EleutherAI/arithmetic 5ds problems with this
+# model and keeping the ~48% it gets wrong (see build_hard_arithmetic.py),
+# then taking 200 train / 50 eval. Because every example is a known failure,
+# attempt-1 accuracy starts near 0% — maximal room for self-correction, and
+# the format reward (0.25+0.25) carries the early gradient signal.
 #
-# At this config the probe measured ~88% format compliance and ~12%
-# truncation pre-training — both should improve under the format reward +
-# length tracking, and watching them do so validates those features.
+# Tiny + fast: 200 train at batch 16 = ~13 steps/stage (vs gsm8k's 269),
+# eval is a single batch of 50. A full two-stage run is well under an hour
+# of training. Use it to shake out the loop / new features before spending
+# Spark wallclock on a real task.
 
 model:
   name: Qwen/Qwen3-0.6B
@@ -36,15 +34,10 @@ model:
       - down_proj
 
 dataset:
-  name: EleutherAI/arithmetic
-  config_name: default              # the parquet export collapses all 10 subsets into one config
-  revision: refs/convert/parquet    # EleutherAI/arithmetic ships a legacy dataset script; the
-                                    # auto-generated parquet export is the loadable form
-  split: validation[16000:18000]    # rows 16000-17999 of the export are the arithmetic_5da subset
-                                    # (5-digit addition); single split -> partitioned below
-  input_field: context              # e.g. "Question: What is 65360 plus 16204?\nAnswer:"
-  target_field: completion          # bare number, e.g. " 81564" — gsm8k_hash strips + extracts
-  test_split_size: 200              # 200 held out for eval, remaining 1800 -> train
+  name: torchtrade/arithmetic-hard-qwen3-0.6b   # curated: 5-digit subtractions Qwen3-0.6B fails
+  input_field: question             # clean text, e.g. "What is 70641 minus 71101?"
+  target_field: answer              # bare number, e.g. "-460" — gsm8k_hash extracts it
+  test_split_size: 50               # dataset ships train(200)/test(50); all 50 test -> held-out eval
 
 prompts:
   system: |
@@ -67,8 +60,8 @@ reward:
   answer_extractor: gsm8k_hash      # pulls the number from <answer>N</answer> or bare target
 
 train:
-  stage1_batch_size: 32
-  stage2_batch_size: 32
+  stage1_batch_size: 16             # 200 train -> ~13 steps/stage. batch 16 not 32: same total
+  stage2_batch_size: 16             # generation wallclock per epoch but 2x the optimizer steps.
   learning_rate: 2.0e-5
   stage1_epochs: 1
   stage2_epochs: 1
@@ -82,10 +75,10 @@ train:
   generation_temperature: 0.6       # Qwen3 thinking mode: >0 required
   seed: 3407
   length_norm: sequence             # "constant" for the Dr.GRPO length-bias fix (see gsm8k.yaml)
-  checkpoint_every: 15              # ~56 steps/stage -> saves at 15/30/45 + end-of-stage = 4/stage.
+  checkpoint_every: 4               # ~13 steps/stage -> saves at 4/8/12 + end-of-stage = 4/stage.
                                     # exercises the mid-stage checkpoint feature on this toy run.
 
 eval:
   batch_size: 50
-  max_examples: 200                 # matches test_split_size
+  max_examples: 50                  # one batch of 50 — the dataset's full test split
   generation_temperature: 0.0

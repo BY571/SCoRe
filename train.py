@@ -269,10 +269,15 @@ def load_and_prepare_data(
                 f"test set size {len(test_dataset)}"
             )
         held_out = test_dataset.select(range(dataset_cfg.test_split_size))
-        extra_train = test_dataset.select(
-            range(dataset_cfg.test_split_size, len(test_dataset))
-        )
-        train_dataset = concatenate_datasets([dataset, extra_train])
+        # Spill any unused test examples back into train. When test_split_size
+        # consumes the whole test split there's nothing to spill — and an empty
+        # contiguous .select() trips a bounds check in `datasets`, so skip it.
+        if dataset_cfg.test_split_size < len(test_dataset):
+            extra_train = test_dataset.select(
+                range(dataset_cfg.test_split_size, len(test_dataset))
+            )
+            dataset = concatenate_datasets([dataset, extra_train])
+        train_dataset = dataset
         test_dataset = held_out
 
     def build(examples: dict[str, list]) -> dict[str, list]:
