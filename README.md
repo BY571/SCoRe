@@ -35,10 +35,22 @@ python train.py --config configs/gsm8k.yaml --smoke 8
 
 Logs go to W&B (`wandb_project` in the config). LoRA adapters save to `outputs/{run_name}/stage{1,2}/`.
 
+## Selecting the reward
+
+The reward function and answer extractor are chosen by name in the YAML — `train.py` looks them up from the `reward_function.py` registries:
+
+```yaml
+reward:
+  fn: strict_format_and_match    # or: format_and_match, exact_match
+  answer_extractor: gsm8k_hash   # or: math_final_answer, identity
+```
+
+Shipped reward functions: `format_and_match` (loose tag check), `strict_format_and_match` (whole-output must be exactly the two blocks), `exact_match` (extracted-answer equality only).
+
 ## Adapt to a new task
 
 1. Push your dataset to the HF Hub with `train` and `test` splits. For datasets needing a sub-config (e.g. `openai/gsm8k` has `main`/`socratic`), set `dataset.config_name`.
 2. Add an answer extractor in `reward_function.py` if the shipped ones don't fit (`gsm8k_hash`, `math_final_answer`, `identity`).
-3. Add a reward function if `format_and_match` or `exact_match` don't fit.
+3. Add a reward function if none of the shipped ones fit.
 4. Copy `configs/gsm8k.yaml`, edit `model.*` / `dataset.*` / `prompts.*` / `reward.*`.
 5. Smoke first (`--smoke 8`), then full.
